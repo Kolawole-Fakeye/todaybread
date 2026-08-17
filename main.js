@@ -30,29 +30,37 @@ const pool = new Pool({
 
 // Starter categories per industry, seeded into the categories table once at
 // signup. Purely a starting point — owners can rename, delete, or add their
-// own at any time afterward. 'other' gets nothing, since there's no sane
-// generic list that wouldn't just be noise for a business it doesn't fit.
+// own at any time afterward. 'Other / General' gets nothing, since there's
+// no sane generic list that wouldn't just be noise for a business it doesn't fit.
+// Keys are the exact industry strings — same value used in the frontend
+// dropdown, no separate slug to keep in sync.
 const INDUSTRY_CATEGORIES = {
-  auto_parts: ['Engine Oil', 'Brake Fluid', 'Coolant', 'Transmission Fluid', 'Power Steering Fluid', 'Grease & Sealant', 'Cleaner & Degreaser', 'Filters', 'Batteries', 'Tyres & Tubes'],
-  cosmetics: ['Skincare', 'Haircare', 'Fragrance', 'Makeup', 'Body Care', 'Soap & Bath', 'Baby Care', "Men's Grooming", 'Nail Care', 'Hair Accessories'],
-  pharmacy: ['Pain Relief', 'Antibiotics', 'Antimalarials', 'Vitamins & Supplements', 'First Aid', 'Cold & Flu', 'Digestive Health', 'Baby & Maternal', 'Medical Devices', 'Skin Treatments'],
-  electronics: ['Phones', 'Chargers & Cables', 'Phone Cases & Screen Protectors', 'Laptops & Accessories', 'Earphones & Headphones', 'Power Banks', 'Memory Cards & Flash Drives', 'Smart Watches', 'Computer Accessories', 'Networking & Routers'],
-  groceries: ['Beverages', 'Snacks', 'Grains & Cereals', 'Canned Goods', 'Dairy', 'Spices & Seasoning', 'Baking Supplies', 'Household Cleaning', 'Toiletries', 'Frozen Foods'],
-  fashion: ["Men's Wear", "Women's Wear", "Children's Wear", 'Footwear', 'Bags', 'Jewelry & Watches', 'Belts', 'Underwear', 'Fabric & Textiles', 'Accessories'],
-  other: [],
+  'Auto Parts & Mechanicals': ['Engines & Gearboxes', 'Brake Pads & Rotors', 'Shock Absorbers & Suspension', 'Sensors & Electricals', 'Oils, Fluids & Filters'],
+  'Solar Energy & Inverter Systems': ['Solar Panels', 'Lithium & Tubular Batteries', 'Pure Sine Wave Inverters', 'Charge Controllers (MPPT/PWM)', 'Solar Cables & Accessories'],
+  'Industrial Cables & Fittings': ['Armoured & Single Core Cables', 'Circuit Breakers & Switches', 'Distribution Boxes & Panels', 'Conduit Pipes & Trunking', 'Industrial Sockets & Plugs'],
+  'Sanitary Wares & Building Materials': ['Water Closets & Wash Basins', 'Faucets, Mixers & Showers', 'Floor & Wall Tiles', 'Pipes, Valves & Plumbing', 'Security Doors & Locks'],
+  'IT, Electronics & Phone Accessories': ['Smartphones & Tablets', 'Laptops & Accessories', 'Power Banks & Chargers', 'Audio & Speakers', 'Protective Cases & Screens'],
+  'Cosmetics & Personal Care': ['Skincare & Lotions', 'Perfumes & Body Sprays', 'Hair Extensions & Products', 'Makeup & Beauty Tools', 'Soaps & Toiletries'],
+  'Pharmacy & Healthcare': ['Prescription Drugs', 'OTC Pain Relief & Cold Care', 'Vitamins & Supplements', 'First Aid Supplies', 'Medical Equipment'],
+  'Groceries & Provisions': ['Packaged Foods & Grains', 'Beverages & Drinks', 'Cooking Oils & Spices', 'Soaps & Detergents', 'Snacks & Sweets'],
+  'Fashion & Accessories': ['Men & Women Clothes', 'Shoes & Footwear', 'Bags & Luggage', 'Jewelry & Watches', 'Belts & Accessories'],
+  'Other / General': ['General Items', 'Fast Moving Stock', 'Services & Non-Physical'],
 };
 
 // Same idea as categories, but for the Brand field — real, recognizable
 // brands for the Nigerian market so a fresh signup feels tailored on day one
 // instead of a blank field. Just a starting menu; fully editable afterward.
 const INDUSTRY_BRANDS = {
-  auto_parts: ['Bosch', 'Castrol', 'Mobil', 'Shell', 'Total', 'Toyota Genuine', 'Honda Genuine', 'Prestone', 'Loctite', 'Permatex'],
-  cosmetics: ['Nivea', 'Vaseline', 'Dove', 'Dettol', 'Cussons', 'Ori', 'Cantu', 'Nice & Lovely', 'Amila', 'St. Ives'],
-  pharmacy: ['Emzor', 'Fidson', 'May & Baker', 'Neimeth', 'GSK', 'Panadol', 'Sanofi', 'Swiss Pharma', 'Juhel', 'Ranbaxy'],
-  electronics: ['Samsung', 'Tecno', 'Infinix', 'Itel', 'Apple', 'Oraimo', 'Anker', 'HP', 'Dell', 'Xiaomi'],
-  groceries: ['Indomie', 'Peak', 'Milo', 'Golden Morn', 'Dangote', 'Golden Penny', 'Nestlé', 'Knorr', 'Maggi', 'Coca-Cola'],
-  fashion: ['Nike', 'Adidas', 'Vlisco', 'Puma', 'Woodin', 'Clarks', 'Skechers', 'Fila', 'Reebok', 'Hollandais'],
-  other: [],
+  'Auto Parts & Mechanicals': ['Bosch', 'Toyota Genuine', 'Honda Genuine', 'Denso', 'NGK', 'Monroe', 'TRW', 'ACDelco', 'Febi Bilstein', 'Delphi'],
+  'Solar Energy & Inverter Systems': ['Luminous', 'Felicity Solar', 'Growatt', 'JA Solar', 'Must Power', 'Blue Gate Energy', 'Trojan Battery', 'Victron Energy', 'Canadian Solar', 'Rocket Battery'],
+  'Industrial Cables & Fittings': ['Nigerchin Cables', 'Coleman Cables', 'Cutix Cables', 'Schneider Electric', 'ABB', 'Legrand', 'Siemens', 'Union Cables', 'Eland Cables', 'Cadison'],
+  'Sanitary Wares & Building Materials': ['Roca', 'Twyford', 'Cera', 'TOTO', 'American Standard', 'Kohler', 'Armitage Shanks', 'Dorset', 'Belanto', 'RAK Ceramics'],
+  'IT, Electronics & Phone Accessories': ['Samsung', 'Tecno', 'Infinix', 'Itel', 'Apple', 'Oraimo', 'Anker', 'HP', 'Dell', 'Xiaomi'],
+  'Cosmetics & Personal Care': ['Nivea', 'Vaseline', 'Dove', 'Dettol', 'Cussons', 'Ori', 'Cantu', 'Nice & Lovely', 'Amila', 'St. Ives'],
+  'Pharmacy & Healthcare': ['Emzor', 'Fidson', 'May & Baker', 'Neimeth', 'GSK', 'Panadol', 'Sanofi', 'Swiss Pharma', 'Juhel', 'Ranbaxy'],
+  'Groceries & Provisions': ['Indomie', 'Peak', 'Milo', 'Golden Morn', 'Dangote', 'Golden Penny', 'Nestlé', 'Knorr', 'Maggi', 'Coca-Cola'],
+  'Fashion & Accessories': ['Nike', 'Adidas', 'Vlisco', 'Puma', 'Woodin', 'Clarks', 'Skechers', 'Fila', 'Reebok', 'Hollandais'],
+  'Other / General': [],
 };
 
 // ----------------------------------------------------------------------------
@@ -135,6 +143,14 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS paystack_customer_code TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS dva_account_number TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS dva_account_name TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS dva_bank_name TEXT;
+
+-- Optional quarterly performance email — off by default, owner opts in from
+-- the Insights tab. last_quarterly_report_sent_at prevents double-sends; a
+-- report goes out roughly every 90 days from when they enabled it, rather
+-- than trying to align to calendar quarters (simpler, no edge cases around
+-- signup date vs quarter boundaries).
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS quarterly_reports_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS last_quarterly_report_sent_at TIMESTAMPTZ;
 
 -- Face ID / biometric login credentials (WebAuthn), owner-only by design —
 -- this is for a personal device, not a shared shop terminal, so it's tied
@@ -289,6 +305,36 @@ async function paystackRequest(path, method, body) {
 }
 
 // ----------------------------------------------------------------------------
+// RESEND HELPER (quarterly email reports) — plain REST call, no SDK needed
+// for something this infrequent.
+// ----------------------------------------------------------------------------
+async function sendEmail(to, subject, html) {
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('[email] RESEND_API_KEY not set — skipping');
+    return { skipped: true };
+  }
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM || 'TodayBread <reports@todaybread.ng>',
+      to: [to],
+      subject,
+      html,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error('[email] Resend send failed:', data);
+    throw new Error(data?.message || 'Email send failed');
+  }
+  return data;
+}
+
+// ----------------------------------------------------------------------------
 // WEBAUTHN (FACE ID / BIOMETRIC LOGIN) CONFIG
 // ----------------------------------------------------------------------------
 // These MUST match your actual production frontend domain exactly, or every
@@ -407,6 +453,82 @@ function scheduleDailySummaryJob() {
   const timezone = process.env.BUSINESS_TIMEZONE || 'Africa/Lagos';
   cron.schedule(`${minute} ${hour} * * *`, runDailySummaries, { timezone });
   console.log(`[whatsapp] daily summary job scheduled for ${hour}:${minute} (${timezone})`);
+}
+
+// ----------------------------------------------------------------------------
+// QUARTERLY EMAIL REPORTS — optional, off by default. Checked once a day;
+// any business with quarterly_reports_enabled and no report sent in the last
+// 90 days gets one. Same honest-numbers rules as the in-app Insights tab —
+// items with no cost set are excluded from margin/profit, not treated as free.
+// ----------------------------------------------------------------------------
+async function buildQuarterlyReportHtml(business, ownerEmail) {
+  const ninetyAgo = new Date(); ninetyAgo.setDate(ninetyAgo.getDate() - 90);
+  const sales = (await pool.query(
+    `SELECT s.qty, s.unit_price, s.unit_cost, i.name AS item_name
+     FROM sales s JOIN inventory_items i ON i.id = s.item_id
+     WHERE s.business_id = $1 AND s.occurred_at >= $2 AND s.voided_at IS NULL`,
+    [business.id, ninetyAgo]
+  )).rows;
+  const inventory = (await pool.query('SELECT * FROM inventory_items WHERE business_id = $1', [business.id])).rows;
+
+  const revenue = sales.reduce((s, r) => s + r.qty * r.unit_price, 0);
+  const pricedSales = sales.filter((s) => Number(s.unit_cost) > 0);
+  const cost = pricedSales.reduce((s, r) => s + r.qty * r.unit_cost, 0);
+  const pricedRevenue = pricedSales.reduce((s, r) => s + r.qty * r.unit_price, 0);
+  const profit = pricedRevenue - cost;
+  const margin = pricedRevenue > 0 ? (profit / pricedRevenue) * 100 : 0;
+
+  const tally = {};
+  sales.forEach((r) => { tally[r.item_name] = (tally[r.item_name] || 0) + r.qty; });
+  const topSellers = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const lowStock = inventory.filter((i) => i.stock <= i.reorder_level);
+
+  return `
+    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>📊 ${business.name} — 90-Day Report</h2>
+      <p><strong>Revenue:</strong> ${naira(revenue)}</p>
+      <p><strong>Profit:</strong> ${naira(profit)} (${margin.toFixed(1)}% margin)</p>
+      ${pricedRevenue < revenue ? `<p style="color:#888;font-size:13px;">${naira(revenue - pricedRevenue)} of revenue is from items with no cost price set — excluded from profit/margin above.</p>` : ''}
+      <h3>Top Sellers</h3>
+      <ul>${topSellers.map(([name, qty]) => `<li>${name} — ${qty} sold</li>`).join('') || '<li>No sales this period</li>'}</ul>
+      <h3>Low Stock (${lowStock.length})</h3>
+      <ul>${lowStock.slice(0, 10).map((i) => `<li>${i.name} — ${i.stock} left</li>`).join('') || '<li>Nothing low right now</li>'}</ul>
+      <p style="color:#888;font-size:12px;margin-top:24px;">Sent to ${ownerEmail} because quarterly reports are enabled for ${business.name} on TodayBread. Turn this off any time from the Insights tab.</p>
+    </div>
+  `;
+}
+
+async function runQuarterlyReports() {
+  try {
+    const result = await pool.query(`
+      SELECT b.id, b.name, u.email
+      FROM businesses b
+      JOIN users u ON u.business_id = b.id AND u.role = 'owner'
+      WHERE b.quarterly_reports_enabled = true
+        AND u.email IS NOT NULL
+        AND (b.last_quarterly_report_sent_at IS NULL OR b.last_quarterly_report_sent_at < now() - interval '89 days')
+    `);
+    for (const business of result.rows) {
+      try {
+        const html = await buildQuarterlyReportHtml(business, business.email);
+        await sendEmail(business.email, `Your TodayBread 90-Day Report — ${business.name}`, html);
+        await pool.query('UPDATE businesses SET last_quarterly_report_sent_at = now() WHERE id = $1', [business.id]);
+        console.log(`[quarterly-report] sent to ${business.name}`);
+      } catch (err) {
+        console.error(`[quarterly-report] failed for ${business.name}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[quarterly-report] error:', err.message);
+  }
+}
+
+function scheduleQuarterlyReportJob() {
+  const timezone = process.env.BUSINESS_TIMEZONE || 'Africa/Lagos';
+  // Runs once a day at 10am — cheap to check daily since the 89-day guard
+  // means it's a no-op for almost every business on almost every day.
+  cron.schedule('0 10 * * *', runQuarterlyReports, { timezone });
+  console.log(`[quarterly-report] job scheduled for 10:00 (${timezone})`);
 }
 
 // ----------------------------------------------------------------------------
@@ -546,6 +668,33 @@ app.post('/auth/signup', async (req, res) => {
     sendWhatsAppMessage(recipientNumber, welcomeMsg).catch(err =>
       console.error('[welcome-msg] failed for', businessName, err.message)
     );
+
+    // Auto-set-up a Paystack subscription payment account in the background —
+    // no email typing required from the owner. Paystack's customer API just
+    // needs a syntactically valid email, not a real inbox, since nothing is
+    // actually delivered there for this purpose — it's purely an identifier.
+    // Non-blocking and non-fatal: if this fails (e.g. Paystack account not
+    // live yet), the owner can still set it up manually from the Connect &
+    // Subscription tab later, using their real email if they prefer.
+    (async () => {
+      if (!process.env.PAYSTACK_SECRET_KEY) return;
+      try {
+        const syntheticEmail = `${phone.replace(/[^0-9]/g, '')}@todaybread.ng`;
+        await pool.query('UPDATE users SET email = $1 WHERE id = $2', [syntheticEmail, owner.id]);
+        const [firstName, ...rest] = ownerName.trim().split(' ');
+        const lastName = rest.join(' ') || firstName;
+        const customer = await paystackRequest('/customer', 'POST', { email: syntheticEmail, first_name: firstName, last_name: lastName });
+        const customerCode = customer.data.customer_code;
+        const dva = await paystackRequest('/dedicated_account', 'POST', { customer: customerCode, preferred_bank: 'wema-bank' });
+        await pool.query(
+          `UPDATE businesses SET paystack_customer_code = $1, dva_account_number = $2, dva_account_name = $3, dva_bank_name = $4 WHERE id = $5`,
+          [customerCode, dva.data.account_number, dva.data.account_name, dva.data.bank.name, biz.rows[0].id]
+        );
+        console.log(`[paystack-auto-setup] payment account created for ${businessName}`);
+      } catch (err) {
+        console.error(`[paystack-auto-setup] failed for ${businessName}:`, err.message);
+      }
+    })();
 
     res.status(201).json({ token: signToken(owner), business: biz.rows[0], user: { id: owner.id, name: owner.name, role: owner.role } });
   } catch (err) {
@@ -697,7 +846,7 @@ app.get('/me', requireAuth, async (req, res) => {
   try {
     const business = await pool.query(
       `SELECT id, name, address, whatsapp_number, created_at, trial_ends_at, next_due_date, monthly_fee, slug, industry,
-              dva_account_number, dva_account_name, dva_bank_name
+              dva_account_number, dva_account_name, dva_bank_name, quarterly_reports_enabled
        FROM businesses WHERE id = $1`,
       [req.user.businessId]
     );
@@ -801,6 +950,23 @@ app.post('/webhooks/paystack', async (req, res) => {
     console.log(`[paystack-webhook] subscription extended for ${business.name} — ${naira(amountReceived)} received`);
   } catch (err) {
     console.error('[paystack-webhook] processing error:', err.message);
+  }
+});
+
+// POST /reports/quarterly-opt-in — owner turns the optional 90-day email
+// report on/off, and sets/updates the email it should go to.
+app.post('/reports/quarterly-opt-in', requireAuth, requireOwner, async (req, res) => {
+  const { enabled, email } = req.body;
+  try {
+    if (enabled && (!email || !email.includes('@'))) {
+      return res.status(400).json({ error: 'A valid email is required to enable quarterly reports' });
+    }
+    if (email) await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.user.userId]);
+    await pool.query('UPDATE businesses SET quarterly_reports_enabled = $1 WHERE id = $2', [!!enabled, req.user.businessId]);
+    res.json({ enabled: !!enabled });
+  } catch (err) {
+    console.error('[/reports/quarterly-opt-in] error:', err.message);
+    res.status(500).json({ error: 'Could not update quarterly report setting' });
   }
 });
 
@@ -1953,4 +2119,5 @@ app.listen(PORT, () => {
   console.log(`TodayBread API listening on port ${PORT}`);
   scheduleDailySummaryJob();
   scheduleSubscriptionReminderJob();
+  scheduleQuarterlyReportJob();
 });
