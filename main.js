@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS users (
 -- nullable since it predates this feature and isn't needed for anything else.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 
+-- "Forgot PIN?" flow: a locked-out user's request is flagged here, a super
+-- admin resolves it from /admin/pin-resets. False/unset for everyone until
+-- actually requested.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pin_reset_requested BOOLEAN NOT NULL DEFAULT false;
+
+-- Flags TodayBread's own super-admin account(s) — not a per-business role,
+-- this is what unlocks /admin/* routes regardless of which business a login
+-- belongs to. Nobody has this by default.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT false;
+
 -- Paystack Dedicated Virtual Account details, once the owner sets one up —
 -- one bank account per business, permanently theirs, any transfer to it is
 -- auto-detected via webhook. Nothing here until they set it up.
@@ -207,6 +217,19 @@ CREATE TABLE IF NOT EXISTS inventory_items (
 -- to an existing table, so these run every migrate and are no-ops once applied.
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE;
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_number TEXT;
+
+-- Two more that were referenced throughout the query code (item creation,
+-- restock, staff-view filtering) but had never actually been added here —
+-- same class of gap as slug/address on businesses. warehouse_stock is the
+-- back-room count that /restock moves into shop-floor stock; brand is the
+-- manufacturer/brand name shown and filtered on everywhere in the UI.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS warehouse_stock INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS brand TEXT NOT NULL DEFAULT '';
+
+-- Whether this item shows on the business's public storefront
+-- (/shop/:slug). Off by default — an owner has to explicitly choose what's
+-- visible to customers, nothing is public just by existing in inventory.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT false;
 
 -- Baseline quantity — the total ever stocked in (initial add + every real
 -- delivery via receive-stock), never touched by sales deductions. "stock"
