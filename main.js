@@ -34,33 +34,39 @@ const pool = new Pool({
 // no sane generic list that wouldn't just be noise for a business it doesn't fit.
 // Keys are the exact industry strings — same value used in the frontend
 // dropdown, no separate slug to keep in sync.
+// Keys here are slugs — they must match INDUSTRY_OPTIONS values in App.jsx
+// exactly, since that's literally what the signup form sends as `industry`.
+// (Previously this map was keyed by full display label while the frontend
+// sent a slug, so hasOwnProperty() never matched and every signup silently
+// fell through to 'other' with no starter categories — fixed by aligning
+// both sides on the same slug set.)
 const INDUSTRY_CATEGORIES = {
-  'Auto Parts & Mechanicals': ['Engines & Gearboxes', 'Brake Pads & Rotors', 'Shock Absorbers & Suspension', 'Sensors & Electricals', 'Oils, Fluids & Filters'],
-  'Solar Energy & Inverter Systems': ['Solar Panels', 'Lithium & Tubular Batteries', 'Pure Sine Wave Inverters', 'Charge Controllers (MPPT/PWM)', 'Solar Cables & Accessories'],
-  'Industrial Cables & Fittings': ['Armoured & Single Core Cables', 'Circuit Breakers & Switches', 'Distribution Boxes & Panels', 'Conduit Pipes & Trunking', 'Industrial Sockets & Plugs'],
-  'Sanitary Wares & Building Materials': ['Water Closets & Wash Basins', 'Faucets, Mixers & Showers', 'Floor & Wall Tiles', 'Pipes, Valves & Plumbing', 'Security Doors & Locks'],
-  'IT, Electronics & Phone Accessories': ['Smartphones & Tablets', 'Laptops & Accessories', 'Power Banks & Chargers', 'Audio & Speakers', 'Protective Cases & Screens'],
-  'Cosmetics & Personal Care': ['Skincare & Lotions', 'Perfumes & Body Sprays', 'Hair Extensions & Products', 'Makeup & Beauty Tools', 'Soaps & Toiletries'],
-  'Pharmacy & Healthcare': ['Prescription Drugs', 'OTC Pain Relief & Cold Care', 'Vitamins & Supplements', 'First Aid Supplies', 'Medical Equipment'],
-  'Groceries & Provisions': ['Packaged Foods & Grains', 'Beverages & Drinks', 'Cooking Oils & Spices', 'Soaps & Detergents', 'Snacks & Sweets'],
-  'Fashion & Accessories': ['Men & Women Clothes', 'Shoes & Footwear', 'Bags & Luggage', 'Jewelry & Watches', 'Belts & Accessories'],
-  'Other / General': ['General Items', 'Fast Moving Stock', 'Services & Non-Physical'],
+  auto_parts: ['Engines & Gearboxes', 'Brake Pads & Rotors', 'Shock Absorbers & Suspension', 'Sensors & Electricals', 'Oils, Fluids & Filters'],
+  building_materials: ['Water Closets & Wash Basins', 'Faucets, Mixers & Showers', 'Floor & Wall Tiles', 'Pipes, Valves & Plumbing', 'Cement, Blocks & Roofing'],
+  solar_energy: ['Solar Panels', 'Lithium & Tubular Batteries', 'Pure Sine Wave Inverters', 'Charge Controllers (MPPT/PWM)', 'Solar Cables & Accessories'],
+  electrical_cables: ['Armoured & Single Core Cables', 'Circuit Breakers & Switches', 'Distribution Boxes & Panels', 'Conduit Pipes & Trunking', 'Industrial Sockets & Plugs'],
+  electronics: ['Smartphones & Tablets', 'Laptops & Accessories', 'Power Banks & Chargers', 'Audio & Speakers', 'Protective Cases & Screens'],
+  cosmetics: ['Skincare & Lotions', 'Perfumes & Body Sprays', 'Hair Extensions & Products', 'Makeup & Beauty Tools', 'Soaps & Toiletries'],
+  pharmacy: ['Prescription Drugs', 'OTC Pain Relief & Cold Care', 'Vitamins & Supplements', 'First Aid Supplies', 'Medical Equipment'],
+  groceries: ['Packaged Foods & Grains', 'Beverages & Drinks', 'Cooking Oils & Spices', 'Soaps & Detergents', 'Snacks & Sweets'],
+  fashion: ['Men & Women Clothes', 'Shoes & Footwear', 'Bags & Luggage', 'Jewelry & Watches', 'Belts & Accessories'],
+  other: ['General Items', 'Fast Moving Stock', 'Services & Non-Physical'],
 };
 
 // Same idea as categories, but for the Brand field — real, recognizable
 // brands for the Nigerian market so a fresh signup feels tailored on day one
 // instead of a blank field. Just a starting menu; fully editable afterward.
 const INDUSTRY_BRANDS = {
-  'Auto Parts & Mechanicals': ['Bosch', 'Toyota Genuine', 'Honda Genuine', 'Denso', 'NGK', 'Monroe', 'TRW', 'ACDelco', 'Febi Bilstein', 'Delphi'],
-  'Solar Energy & Inverter Systems': ['Luminous', 'Felicity Solar', 'Growatt', 'JA Solar', 'Must Power', 'Blue Gate Energy', 'Trojan Battery', 'Victron Energy', 'Canadian Solar', 'Rocket Battery'],
-  'Industrial Cables & Fittings': ['Nigerchin Cables', 'Coleman Cables', 'Cutix Cables', 'Schneider Electric', 'ABB', 'Legrand', 'Siemens', 'Union Cables', 'Eland Cables', 'Cadison'],
-  'Sanitary Wares & Building Materials': ['Roca', 'Twyford', 'Cera', 'TOTO', 'American Standard', 'Kohler', 'Armitage Shanks', 'Dorset', 'Belanto', 'RAK Ceramics'],
-  'IT, Electronics & Phone Accessories': ['Samsung', 'Tecno', 'Infinix', 'Itel', 'Apple', 'Oraimo', 'Anker', 'HP', 'Dell', 'Xiaomi'],
-  'Cosmetics & Personal Care': ['Nivea', 'Vaseline', 'Dove', 'Dettol', 'Cussons', 'Ori', 'Cantu', 'Nice & Lovely', 'Amila', 'St. Ives'],
-  'Pharmacy & Healthcare': ['Emzor', 'Fidson', 'May & Baker', 'Neimeth', 'GSK', 'Panadol', 'Sanofi', 'Swiss Pharma', 'Juhel', 'Ranbaxy'],
-  'Groceries & Provisions': ['Indomie', 'Peak', 'Milo', 'Golden Morn', 'Dangote', 'Golden Penny', 'Nestlé', 'Knorr', 'Maggi', 'Coca-Cola'],
-  'Fashion & Accessories': ['Nike', 'Adidas', 'Vlisco', 'Puma', 'Woodin', 'Clarks', 'Skechers', 'Fila', 'Reebok', 'Hollandais'],
-  'Other / General': [],
+  auto_parts: ['Bosch', 'Toyota Genuine', 'Honda Genuine', 'Denso', 'NGK', 'Monroe', 'TRW', 'ACDelco', 'Febi Bilstein', 'Delphi'],
+  building_materials: ['Roca', 'Twyford', 'Cera', 'TOTO', 'American Standard', 'Kohler', 'Armitage Shanks', 'Dorset', 'Belanto', 'RAK Ceramics'],
+  solar_energy: ['Luminous', 'Felicity Solar', 'Growatt', 'JA Solar', 'Must Power', 'Blue Gate Energy', 'Trojan Battery', 'Victron Energy', 'Canadian Solar', 'Rocket Battery'],
+  electrical_cables: ['Nigerchin Cables', 'Coleman Cables', 'Cutix Cables', 'Schneider Electric', 'ABB', 'Legrand', 'Siemens', 'Union Cables', 'Eland Cables', 'Cadison'],
+  electronics: ['Samsung', 'Tecno', 'Infinix', 'Itel', 'Apple', 'Oraimo', 'Anker', 'HP', 'Dell', 'Xiaomi'],
+  cosmetics: ['Nivea', 'Vaseline', 'Dove', 'Dettol', 'Cussons', 'Ori', 'Cantu', 'Nice & Lovely', 'Amila', 'St. Ives'],
+  pharmacy: ['Emzor', 'Fidson', 'May & Baker', 'Neimeth', 'GSK', 'Panadol', 'Sanofi', 'Swiss Pharma', 'Juhel', 'Ranbaxy'],
+  groceries: ['Indomie', 'Peak', 'Milo', 'Golden Morn', 'Dangote', 'Golden Penny', 'Nestlé', 'Knorr', 'Maggi', 'Coca-Cola'],
+  fashion: ['Nike', 'Adidas', 'Vlisco', 'Puma', 'Woodin', 'Clarks', 'Skechers', 'Fila', 'Reebok', 'Hollandais'],
+  other: [],
 };
 
 // ----------------------------------------------------------------------------
@@ -159,6 +165,11 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS dva_bank_name TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS quarterly_reports_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS last_quarterly_report_sent_at TIMESTAMPTZ;
 
+-- Lets an owner turn off all outbound WhatsApp from TodayBread for privacy
+-- (welcome message, daily summary, manual share/summary buttons in the app).
+-- Defaults true so nothing changes for existing businesses until they opt out.
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_enabled BOOLEAN NOT NULL DEFAULT true;
+
 -- Face ID / biometric login credentials (WebAuthn), owner-only by design —
 -- this is for a personal device, not a shared shop terminal, so it's tied
 -- to a specific user, not the business.
@@ -196,6 +207,27 @@ CREATE TABLE IF NOT EXISTS inventory_items (
 -- to an existing table, so these run every migrate and are no-ops once applied.
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE;
 ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_number TEXT;
+
+-- Baseline quantity — the total ever stocked in (initial add + every real
+-- delivery via receive-stock), never touched by sales deductions. "stock"
+-- keeps moving as the running count; seed_quantity is the fixed reference
+-- point for "how much did we actually bring in" regardless of what daily
+-- ledger entries have since subtracted (or over-subtracted) from it.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS seed_quantity INTEGER NOT NULL DEFAULT 0;
+UPDATE inventory_items SET seed_quantity = stock WHERE seed_quantity = 0 AND stock <> 0;
+
+-- Running, never-reset count of units sold — separate from stock. This is
+-- what lets a product born straight from a sales-book photo (no known
+-- starting count) show "47 sold this month" instead of a stock number
+-- going negative, which reads as broken rather than informative.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS total_sold INTEGER NOT NULL DEFAULT 0;
+
+-- False for items created with no real starting count (auto-created from an
+-- unmatched line on a Recording Sales photo). For these, sales only advance
+-- total_sold and never touch stock — there's no honest baseline to deduct
+-- from. True (default) for everything else, which keeps deducting stock
+-- exactly as before.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS stock_tracked BOOLEAN NOT NULL DEFAULT true;
 
 CREATE TABLE IF NOT EXISTS sales (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -432,7 +464,7 @@ async function buildDailySummary(businessId) {
 }
 
 async function runDailySummaries() {
-  const businesses = await pool.query('SELECT id, name, whatsapp_number FROM businesses WHERE whatsapp_number IS NOT NULL');
+  const businesses = await pool.query('SELECT id, name, whatsapp_number FROM businesses WHERE whatsapp_number IS NOT NULL AND whatsapp_enabled = true');
   for (const business of businesses.rows) {
     try {
       const summary = await buildDailySummary(business.id);
@@ -607,7 +639,7 @@ function generateSlug(name) {
 }
 
 app.post('/auth/signup', async (req, res) => {
-  const { businessName, ownerName, phone, pin, whatsappNumber, address, inviteCode, industry } = req.body;
+  const { businessName, ownerName, phone, pin, whatsappNumber, address, inviteCode, industry, whatsappEnabled } = req.body;
   if (!businessName || !ownerName || !phone || !pin) {
     return res.status(400).json({ error: 'businessName, ownerName, phone, and pin are required' });
   }
@@ -630,9 +662,9 @@ app.post('/auth/signup', async (req, res) => {
     if (existing.rows.length > 0) slug = slug + '-' + Date.now();
 
     const biz = await client.query(
-      `INSERT INTO businesses (name, whatsapp_number, address, slug, industry, trial_ends_at, next_due_date)
-       VALUES ($1, $2, $3, $4, $5, now() + interval '14 days', now() + interval '14 days') RETURNING *`,
-      [businessName, whatsappNumber || phone, address || null, slug, cleanIndustry]
+      `INSERT INTO businesses (name, whatsapp_number, address, slug, industry, whatsapp_enabled, trial_ends_at, next_due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, now() + interval '14 days', now() + interval '14 days') RETURNING *`,
+      [businessName, whatsappNumber || phone, address || null, slug, cleanIndustry, whatsappEnabled !== false]
     );
     const pinHash = await bcrypt.hash(pin, 10);
     const userRes = await client.query(
@@ -672,9 +704,11 @@ app.post('/auth/signup', async (req, res) => {
       `— TodayBread Team`;
 
     const recipientNumber = whatsappNumber || phone;
-    sendWhatsAppMessage(recipientNumber, welcomeMsg).catch(err =>
-      console.error('[welcome-msg] failed for', businessName, err.message)
-    );
+    if (biz.rows[0].whatsapp_enabled) {
+      sendWhatsAppMessage(recipientNumber, welcomeMsg).catch(err =>
+        console.error('[welcome-msg] failed for', businessName, err.message)
+      );
+    }
 
     // Auto-set-up a Paystack subscription payment account in the background —
     // no email typing required from the owner. Paystack's customer API just
@@ -853,7 +887,7 @@ app.get('/me', requireAuth, async (req, res) => {
   try {
     const business = await pool.query(
       `SELECT id, name, address, whatsapp_number, created_at, trial_ends_at, next_due_date, monthly_fee, slug, industry,
-              dva_account_number, dva_account_name, dva_bank_name, quarterly_reports_enabled
+              dva_account_number, dva_account_name, dva_bank_name, quarterly_reports_enabled, whatsapp_enabled
        FROM businesses WHERE id = $1`,
       [req.user.businessId]
     );
@@ -977,7 +1011,21 @@ app.post('/reports/quarterly-opt-in', requireAuth, requireOwner, async (req, res
   }
 });
 
-// --- FACE ID / BIOMETRIC LOGIN (WEBAUTHN), OWNER ONLY ---
+// POST /settings/whatsapp — owner turns TodayBread's outbound WhatsApp
+// messages (welcome message, daily summary) on or off for privacy. This
+// never touches the number itself — just whether TodayBread sends to it.
+app.post('/settings/whatsapp', requireAuth, requireOwner, async (req, res) => {
+  const { enabled } = req.body;
+  try {
+    await pool.query('UPDATE businesses SET whatsapp_enabled = $1 WHERE id = $2', [!!enabled, req.user.businessId]);
+    res.json({ enabled: !!enabled });
+  } catch (err) {
+    console.error('[/settings/whatsapp] error:', err.message);
+    res.status(500).json({ error: 'Could not update WhatsApp setting' });
+  }
+});
+
+
 // This is scoped to the owner's own personal device on purpose — it enrolls
 // ONE device's biometric sensor to ONE user account. That fits an owner's own
 // phone; it doesn't fit a shared shop terminal where staff rotate, so staff
@@ -1290,7 +1338,7 @@ function generateSku() {
 }
 
 app.post('/inventory', requireAuth, requireOwner, async (req, res) => {
-  const { name, size, category, costPrice, salePrice, stock, warehouseStock, reorderLevel, origin, brand, expiryDate, batchNumber } = req.body;
+  const { name, size, category, costPrice, salePrice, stock, warehouseStock, reorderLevel, origin, brand, expiryDate, batchNumber, stockTracked } = req.body;
   // Only the item name is truly required — everything else (including price)
   // can be filled in later. The frontend nudges for a sale price but the
   // backend won't block on it, since a blank/0 default is safe either way.
@@ -1309,9 +1357,9 @@ app.post('/inventory', requireAuth, requireOwner, async (req, res) => {
       const sku = generateSku();
       try {
         result = await pool.query(
-          `INSERT INTO inventory_items (business_id, sku, name, size, category, brand, cost_price, sale_price, stock, warehouse_stock, reorder_level, origin, expiry_date, batch_number)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-          [req.user.businessId, sku, name.trim(), size, cleanCategory, brand || '', costPrice || 0, salePrice || 0, stock || 0, warehouseStock || 0, reorderLevel || 0, origin, expiryDate || null, batchNumber || null]
+          `INSERT INTO inventory_items (business_id, sku, name, size, category, brand, cost_price, sale_price, stock, warehouse_stock, reorder_level, origin, expiry_date, batch_number, seed_quantity, stock_tracked)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+          [req.user.businessId, sku, name.trim(), size, cleanCategory, brand || '', costPrice || 0, salePrice || 0, stock || 0, warehouseStock || 0, reorderLevel || 0, origin, expiryDate || null, batchNumber || null, stock || 0, stockTracked !== false]
         );
         break;
       } catch (err) {
@@ -1401,6 +1449,28 @@ app.delete('/inventory/:id', requireAuth, requireOwner, async (req, res) => {
   }
 });
 
+// PATCH /inventory/:id/start-tracking — converts an item born from a
+// Snapshot sale (stock_tracked = false, no honest baseline) into a normally
+// tracked item, once the owner has actually counted what's on the shelf.
+// Sets stock AND seed_quantity to that fresh count — this moment IS the
+// baseline, same as adding a brand-new item with an opening count.
+app.patch('/inventory/:id/start-tracking', requireAuth, requireOwner, async (req, res) => {
+  const startingStock = Number(req.body.startingStock);
+  if (!Number.isFinite(startingStock) || startingStock < 0) return res.status(400).json({ error: 'startingStock must be a non-negative number' });
+  try {
+    const result = await pool.query(
+      `UPDATE inventory_items SET stock_tracked = true, stock = $1, seed_quantity = $1, updated_at = now()
+       WHERE id = $2 AND business_id = $3 RETURNING *`,
+      [startingStock, req.params.id, req.user.businessId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Item not found' });
+    res.json({ item: result.rows[0] });
+  } catch (err) {
+    console.error('[start-tracking] error:', err.message);
+    res.status(500).json({ error: 'Could not update this item' });
+  }
+});
+
 // PATCH /inventory/:id/restock — moves units from warehouse stock to shop
 // floor stock. Internal transfer only, no cost implications (same items,
 // same cost) — this is just relocating what's already owned, not receiving
@@ -1460,7 +1530,7 @@ app.patch('/inventory/:id/receive-stock', requireAuth, requireOwner, async (req,
 
     const result = await pool.query(
       `UPDATE inventory_items
-       SET stock = stock + $1, cost_price = $2, expiry_date = $3, batch_number = $4, updated_at = now()
+       SET stock = stock + $1, seed_quantity = seed_quantity + $1, cost_price = $2, expiry_date = $3, batch_number = $4, updated_at = now()
        WHERE id = $5 AND business_id = $6 RETURNING *`,
       [qty, newCost, newExpiry, newBatch, req.params.id, req.user.businessId]
     );
@@ -1475,11 +1545,24 @@ app.patch('/inventory/:id/receive-stock', requireAuth, requireOwner, async (req,
 });
 
 // --- SALES ---
-async function recordSale(client, businessId, staffUserId, { itemId, qty, paymentMethod, clientUuid, occurredAt }) {
+// Ledger-first: recording what was actually sold or logged should never be
+// gated by what the stock count currently says. A shopkeeper entering
+// today's sales shouldn't be stopped mid-entry because the count is stale,
+// wrong, or was never tracked for that item. total_sold always advances by
+// qty, full stop — it's a pure running sales counter, never gated or reset.
+// Whether STOCK also moves is separate: items with stock_tracked = false
+// (born from a sales photo with no real starting count) never touch stock
+// at all — there's nothing honest to deduct from, so showing a plunging
+// negative number would just look broken. Items with a real baseline keep
+// deducting normally, controlled by deductStock, and can go negative if
+// genuinely oversold relative to a real starting count — that's a
+// legitimate signal there, not a display bug.
+async function recordSale(client, businessId, staffUserId, { itemId, qty, paymentMethod, clientUuid, occurredAt, deductStock }) {
   const itemResult = await client.query('SELECT * FROM inventory_items WHERE id = $1 AND business_id = $2 FOR UPDATE', [itemId, businessId]);
   const item = itemResult.rows[0];
   if (!item) return { error: 'Item not found', status: 404 };
-  if (item.stock < qty) return { error: `Not enough stock for ${item.name}`, status: 409 };
+
+  const shouldDeductStock = deductStock !== false && item.stock_tracked !== false;
 
   const saleResult = await client.query(
     `INSERT INTO sales (business_id, item_id, staff_user_id, qty, unit_price, unit_cost, payment_method, client_uuid, occurred_at)
@@ -1488,8 +1571,17 @@ async function recordSale(client, businessId, staffUserId, { itemId, qty, paymen
   );
   if (saleResult.rows.length === 0) return { duplicate: true, item };
 
-  const updatedItem = await client.query('UPDATE inventory_items SET stock = stock - $1, updated_at = now() WHERE id = $2 RETURNING *', [qty, itemId]);
-  return { sale: saleResult.rows[0], item: updatedItem.rows[0] };
+  const upd = shouldDeductStock
+    ? await client.query('UPDATE inventory_items SET stock = stock - $1, total_sold = total_sold + $1, updated_at = now() WHERE id = $2 RETURNING *', [qty, itemId])
+    : await client.query('UPDATE inventory_items SET total_sold = total_sold + $1, updated_at = now() WHERE id = $2 RETURNING *', [qty, itemId]);
+  const updatedItem = upd.rows[0];
+
+  return {
+    sale: saleResult.rows[0],
+    item: updatedItem,
+    stockDeducted: shouldDeductStock,
+    wentNegative: shouldDeductStock && Number(updatedItem.stock) < 0,
+  };
 }
 
 app.post('/sales', requireAuth, async (req, res) => {
@@ -1915,6 +2007,7 @@ app.post('/ocr/commit', requireAuth, async (req, res) => {
         qty: row.quantity,
         paymentMethod: row.paymentMethod || 'Cash',
         clientUuid: row.clientUuid || `ocr-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        deductStock: row.deductStock !== false,
       });
       if (result.error) { await client.query('ROLLBACK'); results.push({ itemId: row.itemId, status: 'failed', error: result.error }); }
       else { await client.query('COMMIT'); results.push({ itemId: row.itemId, status: 'recorded' }); }
