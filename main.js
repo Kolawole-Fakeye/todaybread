@@ -88,6 +88,13 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS monthly_fee NUMERIC(12,2) NOT NU
 -- for, so the same cycle doesn't nag the admin more than once.
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS reminder_sent_for_due_date TIMESTAMPTZ;
 
+-- Public storefront address and share-link slug — used by signup, /me, and
+-- the /catalogue/:slug and /shop/:slug routes, but had never actually been
+-- added here. Unique so two businesses can never collide on the same shop URL.
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS slug TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_businesses_slug ON businesses (slug) WHERE slug IS NOT NULL;
+
 -- One-time backfill for businesses that existed before this feature: give them
 -- a clean 30-day due date starting now rather than retroactively marking them
 -- overdue for a feature they never agreed to. New signups always set these
@@ -2121,4 +2128,3 @@ app.listen(PORT, () => {
   scheduleSubscriptionReminderJob();
   scheduleQuarterlyReportJob();
 });
-
