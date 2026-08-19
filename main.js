@@ -932,16 +932,20 @@ app.get('/me', requireAuth, async (req, res) => {
 // owner has one permanent bank account number to transfer their subscription
 // fee to each month. Requires Paystack's "go-live" process to be completed on
 // your account — this will fail with Paystack's own explanation if it isn't.
+// POST /subscription/setup-payment-account — retry path for the rare case
+// where the automatic setup at signup (see the synthetic-email block above)
+// didn't succeed, e.g. Paystack wasn't configured yet at signup time. Uses
+// the exact same synthetic-email approach, not a real inbox — this was
+// previously asking the owner to type an email here, which contradicted
+// "no client email ever needed" the moment they hit this screen. One tap,
+// nothing to type.
 app.post('/subscription/setup-payment-account', requireAuth, requireOwner, async (req, res) => {
-  const { email } = req.body;
-  if (!email || !email.includes('@')) return res.status(400).json({ error: 'A valid email is required' });
   if (!process.env.PAYSTACK_SECRET_KEY) return res.status(500).json({ error: 'PAYSTACK_SECRET_KEY is not configured on the server' });
 
   try {
     const existing = await pool.query('SELECT dva_account_number, dva_account_name, dva_bank_name FROM businesses WHERE id = $1', [req.user.businessId]);
     if (existing.rows[0]?.dva_account_number) {
-      // Already set up — just save the email if it changed, return what exists.
-      await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.user.userId]);
+      // Already set up — nothing to do, just return what exists.
       return res.json({
         accountNumber: existing.rows[0].dva_account_number,
         accountName: existing.rows[0].dva_account_name,
@@ -949,7 +953,13 @@ app.post('/subscription/setup-payment-account', requireAuth, requireOwner, async
       });
     }
 
-    await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.user.userId]);
+    const userResult = await pool.query('SELECT phone, email FROM users WHERE id = $1', [req.user.userId]);
+    const phone = userResult.rows[0]?.phone || '';
+    const email = userResult.rows[0]?.email || `${phone.replace(/[^0-9]/g, '')}@todaybread.ng`;
+    if (!userResult.rows[0]?.email) {
+      await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.user.userId]);
+    }
+
     const [firstName, ...rest] = (req.user.name || 'Owner').trim().split(' ');
     const lastName = rest.join(' ') || firstName;
 
@@ -1831,6 +1841,71 @@ function fuzzyMatchItem(description, inventory) {
   return bestScore >= 0.12 ? { item: best, confidence: bestScore } : null;
 }
 
+// Dedicated system prompt (separate from the per-request instructions below,
+// which are dynamic — categories, mode, expiry format). This part is fixed:
+// it establishes Gemini's role and the local shorthand it needs to recognize
+// regardless of what's actually on any given page.
+const RECEIPT_PARSER_SYSTEM_PROMPT =
+  `You are an expert at reading handwritten sales and inventory receipts from small businesses, ` +
+  `including Nigerian and West African market shorthand. You are precise, literal, and never invent ` +
+  `data that isn't actually on the page. You correctly interpret common unit abbreviations exactly as ` +
+  `local traders write them — e.g. "3cartn"/"3ctn" = 3 cartons, "2roll" = 2 rolls, "1pack"/"1pck" = 1 pack, ` +
+  `"2paint" = 2 tins/units of paint, "4dz"/"4doz" = 4 dozen, "5pcs" = 5 pieces, "2bag" = 2 bags, "3btl" = 3 bottles. ` +
+  `You recognize the Naira symbol (₦) and its common handwritten stand-ins (N, #, or a slash-through-N) as the ` +
+  `same currency marker, and strip it when extracting a numeric price — never include the symbol itself in a ` +
+  `number field. You respond with ONLY the structured JSON requested — no markdown code fences (no \`\`\`), no ` +
+  `preamble, no explanation, no commentary of any kind before or after the JSON, even when the page is messy, ` +
+  `ambiguous, or partly illegible. If a field genuinely can't be read, use null for it rather than guessing or ` +
+  `omitting the field.`;
+
+// Retries on transient failures (503 High Demand, 429 Rate Limit) with
+// exponential backoff, then falls back to a second model if the primary is
+// still failing after its retries are exhausted. Anything that ISN'T a
+// transient server error (bad request, auth failure, etc.) throws
+// immediately — retrying or switching models can't fix those, so there's no
+// point burning the delay.
+const GEMINI_MODEL_CHAIN = ['gemini-flash-latest', 'gemini-1.5-flash'];
+const GEMINI_RETRY_DELAYS_MS = [1000, 2000, 4000]; // 1s, 2s, 4s between attempts
+
+async function callGeminiWithRetry(requestBody) {
+  let lastErr;
+  for (let modelIdx = 0; modelIdx < GEMINI_MODEL_CHAIN.length; modelIdx++) {
+    const model = GEMINI_MODEL_CHAIN[modelIdx];
+    // Primary model gets the full retry budget (1 initial + 3 retries).
+    // The fallback model gets a single attempt — if the primary is
+    // struggling, cascading full retries onto the fallback too would just
+    // multiply the wait time for no real benefit.
+    const attempts = modelIdx === 0 ? GEMINI_RETRY_DELAYS_MS.length + 1 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const aiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) }
+        );
+        const aiData = await aiRes.json();
+        if (aiRes.ok) return { aiData, modelUsed: model };
+
+        const isTransient = aiRes.status === 503 || aiRes.status === 429;
+        lastErr = new Error(aiData?.error?.message || `Gemini API error (${aiRes.status})`);
+        lastErr.transient = isTransient;
+        if (!isTransient) throw lastErr; // real error — no point retrying or falling back
+      } catch (err) {
+        if (err.transient === false) throw err; // propagate real errors immediately
+        lastErr = err;
+        lastErr.transient = true; // network-level failures (fetch itself threw) are worth retrying too
+      }
+      if (attempt < attempts - 1) {
+        console.warn(`[ocr] ${model} attempt ${attempt + 1}/${attempts} failed transiently, retrying in ${GEMINI_RETRY_DELAYS_MS[attempt]}ms:`, lastErr.message);
+        await new Promise((resolve) => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt]));
+      }
+    }
+    if (modelIdx < GEMINI_MODEL_CHAIN.length - 1) {
+      console.warn(`[ocr] ${model} exhausted, falling back to ${GEMINI_MODEL_CHAIN[modelIdx + 1]}`);
+    }
+  }
+  throw lastErr; // every model, every attempt, exhausted
+}
+
 app.post('/ocr/parse-page', requireAuth, async (req, res) => {
   const { imageBase64, mediaType, text: pastedText, mode } = req.body;
   const hasImage = !!imageBase64;
@@ -1895,11 +1970,15 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       `to figure out where one row ends and the next begins. Do your best to pull real item lines out of that noise. ` +
       `${quantityHint} ${expiryHint} ` +
       `Extract every line item you can make out. ${categoryHint} ` +
-      `Respond with ONLY a JSON array — no explanation, no markdown code fences, no commentary before or after it, ` +
+      `Respond with ONLY the structured JSON — no explanation, no markdown code fences, no commentary before or after it, ` +
       `even if the input looks unusual or you're unsure. In this exact shape: ` +
-      `[{"description": "...", "quantity": number, "amount": number_or_null, "category": string_or_null, "expiryDate": string_or_null, "batchNumber": string_or_null}]. ` +
+      `{"items": [{"description": "...", "quantity": number, "amount": number_or_null, "category": string_or_null, "expiryDate": string_or_null, "batchNumber": string_or_null}]}. ` +
+      `"amount" is the TOTAL ₦ value written for that line — the number next to/after the item as a whole, already ` +
+      `covering all units on that line (e.g. "Baby Diaper 1pack ₦5000" → amount 5000; "Indomie 3carton ₦23550" → ` +
+      `amount 23550, not divided by 3). Never compute or guess a per-unit price yourself — extract exactly the ` +
+      `total figure as written, and leave unit-price math to the app. ` +
       `If a quantity or amount is unreadable or absent, use null. Do not guess values that aren't actually there. ` +
-      `If truly nothing on the page looks like an item line, respond with an empty array [].`;
+      `If truly nothing on the page looks like an item line, respond with {"items": []}.`;
 
     // Gemini's generateContent takes a flat "parts" array — text and inline
     // image data side by side, order doesn't matter the way it can for Claude.
@@ -1912,42 +1991,60 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
           { text: `${instructions}\n\nHere is the pasted ledger text:\n\n${pastedText}` },
         ];
 
-    const aiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts }],
-          generationConfig: {
-            maxOutputTokens: 8192,
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: 'ARRAY',
+    let aiRes;
+    try {
+      aiRes = await callGeminiWithRetry({
+        systemInstruction: { role: 'system', parts: [{ text: RECEIPT_PARSER_SYSTEM_PROMPT }] },
+        contents: [{ role: 'user', parts }],
+        generationConfig: {
+          // Deliberately generous, not tight — a full page can easily run
+          // 20-30 line items once each carries description/qty/amount/
+          // category/expiry/batch. The actual fix for MAX_TOKENS truncation
+          // is thinkingBudget: 0 below (recent Gemini models spend part of
+          // maxOutputTokens on hidden "thinking" before ever writing visible
+          // output, which is what was actually eating the budget) — cutting
+          // maxOutputTokens itself would only make truncation worse.
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingBudget: 0 },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
               items: {
-                type: 'OBJECT',
-                properties: {
-                  description: { type: 'STRING' },
-                  quantity: { type: 'NUMBER', nullable: true },
-                  amount: { type: 'NUMBER', nullable: true },
-                  category: { type: 'STRING', nullable: true },
-                  expiryDate: { type: 'STRING', nullable: true },
-                  batchNumber: { type: 'STRING', nullable: true },
+                type: 'ARRAY',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    description: { type: 'STRING' },
+                    quantity: { type: 'NUMBER', nullable: true },
+                    amount: { type: 'NUMBER', nullable: true },
+                    category: { type: 'STRING', nullable: true },
+                    expiryDate: { type: 'STRING', nullable: true },
+                    batchNumber: { type: 'STRING', nullable: true },
+                  },
+                  required: ['description'],
                 },
-                required: ['description'],
               },
             },
+            required: ['items'],
           },
-        }),
-      }
-    );
-
-    const aiData = await aiRes.json();
-    if (!aiRes.ok) {
-      console.error('[ocr] Gemini API error:', aiData);
-      return res.status(502).json({ error: 'Vision extraction failed', debug: aiData?.error?.message || JSON.stringify(aiData).slice(0, 500) });
+        },
+      });
+    } catch (err) {
+      console.error('[ocr] Gemini call failed after all retries/fallbacks:', err.message);
+      // err.transient means every retry on the primary model AND the
+      // fallback model attempt were all 503/429 — a genuinely busy moment
+      // on Google's end, not something a clearer photo or a rewritten
+      // prompt would fix. Anything else (bad request, auth, etc.) gets its
+      // real message instead of being mislabeled as "busy".
+      return res.status(err.transient ? 503 : 502).json({
+        error: err.transient
+          ? "Network busy — tap 'Parse entries' again in a few seconds."
+          : 'Vision extraction failed',
+        debug: err.message,
+      });
     }
-
+    const aiData = aiRes.aiData;
     const finishReason = aiData.candidates?.[0]?.finishReason;
     const text = (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
     // Don't assume the whole response is pure JSON — strip fences if present,
@@ -1966,11 +2063,11 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
     } catch (e) {
       console.error('[ocr] could not parse Gemini output:', text);
       if (finishReason === 'MAX_TOKENS') {
-        // The response was cut off mid-generation — too many line items for
-        // one request, not a formatting problem. Splitting the input is the
-        // actual fix here, not a clearer photo.
+        // With thinkingConfig disabled and a generous maxOutputTokens, this
+        // should now be rare — if it still happens, it's a genuinely huge
+        // single page, not a normal-sized log hitting an artificial cap.
         return res.status(502).json({
-          error: 'This page has too many line items to process in one go — try splitting it into two smaller photos or pastes.',
+          error: 'Could not read the whole page in one pass — try a clearer photo, or split it if it covers more than one day.',
           debug: `Response was truncated at the token limit (finishReason: MAX_TOKENS). Partial output: ${text.slice(-300)}`,
         });
       }
