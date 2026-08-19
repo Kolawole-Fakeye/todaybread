@@ -1864,7 +1864,13 @@ const RECEIPT_PARSER_SYSTEM_PROMPT =
 // transient server error (bad request, auth failure, etc.) throws
 // immediately — retrying or switching models can't fix those, so there's no
 // point burning the delay.
-const GEMINI_MODEL_CHAIN = ['gemini-flash-latest', 'gemini-1.5-flash'];
+// Both use Google's rolling "-latest" alias, not a pinned version number —
+// pinned versions keep getting sunset (gemini-1.5-flash is gone entirely;
+// gemini-2.0-flash was discontinued June 2026 too), so hardcoding a specific
+// version here would just recreate this exact failure again in a few months.
+// The fallback is a distinct, cheaper model family — if the primary flash
+// tier is genuinely struggling, this doesn't share the same capacity pool.
+const GEMINI_MODEL_CHAIN = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
 const GEMINI_RETRY_DELAYS_MS = [1000, 2000, 4000]; // 1s, 2s, 4s between attempts
 
 async function callGeminiWithRetry(requestBody) {
