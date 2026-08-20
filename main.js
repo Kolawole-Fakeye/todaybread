@@ -1873,10 +1873,25 @@ const RECEIPT_PARSER_SYSTEM_PROMPT =
 const GEMINI_MODEL_CHAIN = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
 const GEMINI_RETRY_DELAYS_MS = [1000, 2000, 4000]; // 1s, 2s, 4s between attempts
 
-async function callGeminiWithRetry(requestBody) {
+async function callGeminiWithRetry(baseRequestBody) {
   let lastErr;
   for (let modelIdx = 0; modelIdx < GEMINI_MODEL_CHAIN.length; modelIdx++) {
     const model = GEMINI_MODEL_CHAIN[modelIdx];
+    // thinkingLevel (Gemini 3.x) and thinkingBudget (Gemini 2.5 and earlier)
+    // are mutually exclusive per Google's API — sending the wrong one for a
+    // given model's generation either gets silently ignored (leaving
+    // thinking at its default, which is what was actually causing MAX_TOKENS
+    // truncation before) or triggers a 400. The primary "-latest" flash
+    // alias currently resolves to a Gemini 3.x model, which can't fully
+    // disable thinking but can be turned down to "minimal". The fallback is
+    // a Flash-Lite tier, which doesn't think by default — no config needed.
+    const requestBody = {
+      ...baseRequestBody,
+      generationConfig: {
+        ...baseRequestBody.generationConfig,
+        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
+      },
+    };
     // Primary model gets the full retry budget (1 initial + 3 retries).
     // The fallback model gets a single attempt — if the primary is
     // struggling, cascading full retries onto the fallback too would just
@@ -2003,15 +2018,11 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
         systemInstruction: { role: 'system', parts: [{ text: RECEIPT_PARSER_SYSTEM_PROMPT }] },
         contents: [{ role: 'user', parts }],
         generationConfig: {
-          // Deliberately generous, not tight — a full page can easily run
-          // 20-30 line items once each carries description/qty/amount/
-          // category/expiry/batch. The actual fix for MAX_TOKENS truncation
-          // is thinkingBudget: 0 below (recent Gemini models spend part of
-          // maxOutputTokens on hidden "thinking" before ever writing visible
-          // output, which is what was actually eating the budget) — cutting
-          // maxOutputTokens itself would only make truncation worse.
-          maxOutputTokens: 8192,
-          thinkingConfig: { thinkingBudget: 0 },
+          // A full page can easily run 20-30 line items once each carries
+          // description/qty/amount/category/expiry/batch — generous on
+          // purpose. thinkingConfig itself is injected per-model inside
+          // callGeminiWithRetry, not set here — see the comment there for why.
+          maxOutputTokens: 16384,
           responseMimeType: 'application/json',
           responseSchema: {
             type: 'OBJECT',
@@ -2069,9 +2080,10 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
     } catch (e) {
       console.error('[ocr] could not parse Gemini output:', text);
       if (finishReason === 'MAX_TOKENS') {
-        // With thinkingConfig disabled and a generous maxOutputTokens, this
-        // should now be rare — if it still happens, it's a genuinely huge
-        // single page, not a normal-sized log hitting an artificial cap.
+        // thinkingLevel: 'minimal' (not thinkingBudget — Gemini 3 uses a
+        // different parameter, and can't fully disable thinking) plus a
+        // generous maxOutputTokens should make this rare — if it still
+        // happens, it's a genuinely huge single page, not an artificial cap.
         return res.status(502).json({
           error: 'Could not read the whole page in one pass — try a clearer photo, or split it if it covers more than one day.',
           debug: `Response was truncated at the token limit (finishReason: MAX_TOKENS). Partial output: ${text.slice(-300)}`,
