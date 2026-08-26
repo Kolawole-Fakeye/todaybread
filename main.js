@@ -491,7 +491,7 @@ async function runDailySummaries() {
   for (const business of businesses.rows) {
     try {
       const summary = await buildDailySummary(business.id);
-      const dashboardUrl = process.env.DASHBOARD_URL || 'https://dapper-sable-ed0d32.netlify.app';
+      const dashboardUrl = FRONTEND_URL;
 
       const message =
         `📋 *TodayBread Daily Summary*\n` +
@@ -644,6 +644,16 @@ function scheduleSubscriptionReminderJob() {
 }
 
 // ----------------------------------------------------------------------------
+// FRONTEND URL — single source of truth for every link that needs to point
+// at the actual live app (dashboard link in the welcome message, the public
+// catalogue/shop link, the daily summary link). Set DASHBOARD_URL on Render
+// to override without a code change — e.g. once the .com.ng domain is
+// wired up, that's the one line to update instead of hunting through the
+// file for every hardcoded netlify.app reference.
+// ----------------------------------------------------------------------------
+const FRONTEND_URL = process.env.DASHBOARD_URL || 'https://todaybread.netlify.app';
+
+// ----------------------------------------------------------------------------
 // EXPRESS APP
 // ----------------------------------------------------------------------------
 const app = express();
@@ -714,8 +724,13 @@ app.post('/auth/signup', async (req, res) => {
     const owner = userRes.rows[0];
 
     // Send welcome WhatsApp message (non-blocking — signup succeeds even if message fails)
-    const catalogueUrl = `${process.env.DASHBOARD_URL || 'https://todaybread.netlify.app'}`;
-    const shopUrl = `https://todaybread.onrender.com/shop/${biz.rows[0].slug}`;
+    const catalogueUrl = FRONTEND_URL;
+    // /shop/:slug only exists on the FRONTEND (AppEntry.jsx's router) — the
+    // backend itself has no /shop route. This was pointing at the Render
+    // backend domain, which 404s on this path; every welcome message has
+    // been sending new signups a broken link since the public catalogue
+    // feature was built.
+    const shopUrl = `${FRONTEND_URL}/shop/${biz.rows[0].slug}`;
     const welcomeMsg =
       `👋 Welcome to *TodayBread*, ${businessName}!\n\n` +
       `Your shop is now live. Here's what to do next:\n\n` +
@@ -1927,6 +1942,70 @@ async function callGeminiWithRetry(baseRequestBody) {
   throw lastErr; // every model, every attempt, exhausted
 }
 
+// Cross-provider fallback — only reached once EVERY Gemini model and every
+// retry in callGeminiWithRetry has been exhausted. Different vendor, so a
+// Google-side outage doesn't take this feature down entirely. gpt-4o is a
+// long-stable model name (out since May 2024, still supported broadly as of
+// this writing) — deliberately not chasing OpenAI's newest alias the way the
+// Gemini naming chase burned us, but model names age; verify this is still
+// current if it's ever actually invoked and errors with a "model not found".
+async function callOpenAIVisionFallback({ systemPrompt, instructions, imageBase64, mediaType, pastedText }) {
+  if (!process.env.OPENAI_API_KEY) {
+    const err = new Error('OPENAI_API_KEY is not configured — cross-provider fallback unavailable');
+    err.transient = false;
+    throw err;
+  }
+  const userContent = imageBase64
+    ? [
+        { type: 'text', text: instructions },
+        { type: 'image_url', image_url: { url: `data:${mediaType || 'image/jpeg'};base64,${imageBase64}` } },
+      ]
+    : [{ type: 'text', text: `${instructions}\n\nHere is the pasted ledger text:\n\n${pastedText}` }];
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 4096,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `OpenAI API error (${res.status})`);
+    err.transient = res.status === 429 || res.status === 503;
+    throw err;
+  }
+  return data.choices?.[0]?.message?.content || '';
+}
+
+// Self-repair — one single follow-up call when the model's own output came
+// back malformed (truncated JSON, stray commentary, a fence that wasn't
+// stripped cleanly). This has been the actual recurring failure pattern —
+// not the request failing outright, but the response itself being broken.
+// Deliberately text-only and provider-agnostic: fixing already-written text
+// into valid JSON doesn't need vision, so this always uses Gemini's cheapest
+// tier regardless of which provider produced the original broken output.
+async function repairMalformedJson(rawText) {
+  const repairPrompt =
+    `The following text was supposed to be a single valid JSON object matching this exact shape: ` +
+    `{"items": [{"description": string, "quantity": number_or_null, "amount": number_or_null, "category": string_or_null, "expiryDate": string_or_null, "batchNumber": string_or_null}]}. ` +
+    `It's either truncated, malformed, or has stray text around it. Fix it and return ONLY the corrected, complete, ` +
+    `valid JSON — nothing else, no markdown fences, no explanation. If an item was cut off mid-way (incomplete ` +
+    `fields), drop that incomplete item entirely rather than guessing what its missing values might have been. ` +
+    `Here is the broken text:\n\n${rawText}`;
+  const { aiData } = await callGeminiWithRetry({
+    contents: [{ role: 'user', parts: [{ text: repairPrompt }] }],
+    generationConfig: { maxOutputTokens: 16384, responseMimeType: 'application/json' },
+  });
+  return (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+}
+
 app.post('/ocr/parse-page', requireAuth, async (req, res) => {
   const { imageBase64, mediaType, text: pastedText, mode } = req.body;
   const hasImage = !!imageBase64;
@@ -2012,9 +2091,9 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
           { text: `${instructions}\n\nHere is the pasted ledger text:\n\n${pastedText}` },
         ];
 
-    let aiRes;
+    let text, finishReason, modelUsed;
     try {
-      aiRes = await callGeminiWithRetry({
+      const aiRes = await callGeminiWithRetry({
         systemInstruction: { role: 'system', parts: [{ text: RECEIPT_PARSER_SYSTEM_PROMPT }] },
         contents: [{ role: 'user', parts }],
         generationConfig: {
@@ -2047,23 +2126,33 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
           },
         },
       });
-    } catch (err) {
-      console.error('[ocr] Gemini call failed after all retries/fallbacks:', err.message);
-      // err.transient means every retry on the primary model AND the
-      // fallback model attempt were all 503/429 — a genuinely busy moment
-      // on Google's end, not something a clearer photo or a rewritten
-      // prompt would fix. Anything else (bad request, auth, etc.) gets its
-      // real message instead of being mislabeled as "busy".
-      return res.status(err.transient ? 503 : 502).json({
-        error: err.transient
-          ? "Network busy — tap 'Parse entries' again in a few seconds."
-          : 'Vision extraction failed',
-        debug: err.message,
-      });
+      const aiData = aiRes.aiData;
+      modelUsed = aiRes.modelUsed;
+      finishReason = aiData.candidates?.[0]?.finishReason;
+      text = (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+    } catch (geminiErr) {
+      console.error('[ocr] Gemini exhausted (all models, all retries):', geminiErr.message);
+      // Only reached once every Gemini model and every retry has failed —
+      // try a completely different vendor before giving up entirely.
+      try {
+        text = await callOpenAIVisionFallback({
+          systemPrompt: RECEIPT_PARSER_SYSTEM_PROMPT, instructions, imageBase64, mediaType, pastedText,
+        });
+        modelUsed = 'gpt-4o (cross-provider fallback)';
+        finishReason = null;
+        console.warn('[ocr] cross-provider fallback (OpenAI) succeeded after Gemini exhausted');
+      } catch (fallbackErr) {
+        console.error('[ocr] cross-provider fallback also failed:', fallbackErr.message);
+        // Both vendors exhausted — this is the genuine "nothing worked" case.
+        return res.status(geminiErr.transient ? 503 : 502).json({
+          error: geminiErr.transient
+            ? "Network busy — tap 'Parse entries' again in a few seconds."
+            : 'Vision extraction failed',
+          debug: `Gemini: ${geminiErr.message} | Cross-provider fallback: ${fallbackErr.message}`,
+        });
+      }
     }
-    const aiData = aiRes.aiData;
-    const finishReason = aiData.candidates?.[0]?.finishReason;
-    const text = (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+
     // Don't assume the whole response is pure JSON — strip fences if present,
     // then pull out the first [...] block from wherever it actually sits in
     // the response. Survives the model adding a stray sentence of commentary
@@ -2078,23 +2167,39 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       rows = Array.isArray(parsed) ? parsed : (parsed.items || parsed.rows || parsed.lines || []);
       if (!Array.isArray(rows)) throw new Error('not an array');
     } catch (e) {
-      console.error('[ocr] could not parse Gemini output:', text);
-      if (finishReason === 'MAX_TOKENS') {
-        // thinkingLevel: 'minimal' (not thinkingBudget — Gemini 3 uses a
-        // different parameter, and can't fully disable thinking) plus a
-        // generous maxOutputTokens should make this rare — if it still
-        // happens, it's a genuinely huge single page, not an artificial cap.
+      console.warn('[ocr] output malformed, attempting one self-repair pass:', e.message);
+      let repaired = false;
+      try {
+        const repairedText = await repairMalformedJson(text);
+        const repairedCleaned = repairedText.replace(/```json\s*|```/g, '');
+        const repairedParsed = JSON.parse(repairedCleaned);
+        const repairedRows = Array.isArray(repairedParsed) ? repairedParsed : (repairedParsed.items || repairedParsed.rows || repairedParsed.lines || []);
+        if (!Array.isArray(repairedRows)) throw new Error('repair output also not an array');
+        rows = repairedRows;
+        repaired = true;
+        console.warn('[ocr] self-repair succeeded');
+      } catch (repairErr) {
+        console.error('[ocr] self-repair also failed:', repairErr.message);
+      }
+      if (!repaired) {
+        console.error('[ocr] could not parse output even after repair attempt:', text);
+        if (finishReason === 'MAX_TOKENS') {
+          // thinkingLevel: 'minimal' (not thinkingBudget — Gemini 3 uses a
+          // different parameter, and can't fully disable thinking) plus a
+          // generous maxOutputTokens should make this rare — if it still
+          // happens, it's a genuinely huge single page, not an artificial cap.
+          return res.status(502).json({
+            error: 'Could not read the whole page in one pass — try a clearer photo, or split it if it covers more than one day.',
+            debug: `Response was truncated at the token limit (finishReason: MAX_TOKENS). Partial output: ${text.slice(-300)}`,
+          });
+        }
         return res.status(502).json({
-          error: 'Could not read the whole page in one pass — try a clearer photo, or split it if it covers more than one day.',
-          debug: `Response was truncated at the token limit (finishReason: MAX_TOKENS). Partial output: ${text.slice(-300)}`,
+          error: hasImage ? 'Could not parse extracted data — try a clearer photo' : 'Could not parse the pasted text — check it copied over correctly',
+          // Raw model output, truncated — lets you see exactly what it said
+          // instead of having to go dig through Render's server logs.
+          debug: text.slice(0, 800),
         });
       }
-      return res.status(502).json({
-        error: hasImage ? 'Could not parse extracted data — try a clearer photo' : 'Could not parse the pasted text — check it copied over correctly',
-        // Raw model output, truncated — lets you see exactly what it said
-        // instead of having to go dig through Render's server logs.
-        debug: text.slice(0, 800),
-      });
     }
 
     const inventory = (await pool.query('SELECT * FROM inventory_items WHERE business_id = $1', [req.user.businessId])).rows;
@@ -2121,7 +2226,7 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
     });
 
     const totalFromPage = reviewed.reduce((s, r) => s + (r.suggestedTotal || 0), 0);
-    res.json({ rows: reviewed, totalFromPage, rowCount: reviewed.length });
+    res.json({ rows: reviewed, totalFromPage, rowCount: reviewed.length, modelUsed });
   } catch (err) {
     console.error('[ocr] error:', err);
     res.status(500).json({ error: 'Could not process the ledger entry', debug: err.message });
