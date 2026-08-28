@@ -1897,14 +1897,17 @@ async function callGeminiWithRetry(baseRequestBody) {
     // given model's generation either gets silently ignored (leaving
     // thinking at its default, which is what was actually causing MAX_TOKENS
     // truncation before) or triggers a 400. The primary "-latest" flash
-    // alias currently resolves to a Gemini 3.x model, which can't fully
-    // disable thinking but can be turned down to "minimal". The fallback is
-    // a Flash-Lite tier, which doesn't think by default — no config needed.
+    // alias currently resolves to a Gemini 3.x model. 'minimal' was tried
+    // first but this model's API rejected it outright with a 400
+    // ("Thinking level MINIMAL is not supported for this model") — confirmed
+    // via Render logs, not a guess — so 'low' (the lowest of the accepted
+    // low/medium/high tier) is used instead. The fallback is a Flash-Lite
+    // tier, which doesn't think by default — no config needed there.
     const requestBody = {
       ...baseRequestBody,
       generationConfig: {
         ...baseRequestBody.generationConfig,
-        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
+        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'low' } } : {}),
       },
     };
     // Primary model gets the full retry budget (1 initial + 3 retries).
@@ -2184,7 +2187,7 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       if (!repaired) {
         console.error('[ocr] could not parse output even after repair attempt:', text);
         if (finishReason === 'MAX_TOKENS') {
-          // thinkingLevel: 'minimal' (not thinkingBudget — Gemini 3 uses a
+          // thinkingLevel: 'low' (not thinkingBudget — Gemini 3 uses a
           // different parameter, and can't fully disable thinking) plus a
           // generous maxOutputTokens should make this rare — if it still
           // happens, it's a genuinely huge single page, not an artificial cap.
