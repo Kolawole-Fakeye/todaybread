@@ -798,7 +798,7 @@ app.get('/catalogue/:slug', async (req, res) => {
     const itemsResult = await pool.query(
       `SELECT name, brand, category, size, sale_price, origin
        FROM inventory_items
-       WHERE business_id = $1 AND is_public = true AND stock > 0
+       WHERE business_id = $1 AND is_public = true AND (stock_tracked = false OR stock > 0)
        ORDER BY category, name`,
       [business.id]
     );
@@ -2072,7 +2072,10 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       `cartons/packs/bottles, batch-code patterns, date-like tokens, keywords like "Delivered"/"Sold"/"Restocked" — ` +
       `to figure out where one row ends and the next begins. Do your best to pull real item lines out of that noise. ` +
       `${quantityHint} ${expiryHint} ` +
-      `Extract every line item you can make out. ${categoryHint} ` +
+      `Extract every line item you can make out. Scan the ENTIRE page from top to bottom, including the last few ` +
+      `rows near the bottom edge and any items after a subtotal or partial total line — do not stop early or ` +
+      `truncate the list once you've found several items; a page commonly has 15-30+ rows and all of them matter ` +
+      `equally, not just the first few. ${categoryHint} ` +
       `Respond with ONLY the structured JSON — no explanation, no markdown code fences, no commentary before or after it, ` +
       `even if the input looks unusual or you're unsure. In this exact shape: ` +
       `{"items": [{"description": "...", "quantity": number, "amount": number_or_null, "category": string_or_null, "expiryDate": string_or_null, "batchNumber": string_or_null}]}. ` +
@@ -2381,6 +2384,24 @@ app.post('/admin/businesses/:id/mark-paid', requireAuth, requireSuperAdmin, asyn
   } catch (err) {
     console.error('[/admin/businesses/:id/mark-paid]', err.message);
     res.status(500).json({ error: 'Could not mark as paid' });
+  }
+});
+
+// DELETE /admin/businesses/:id — permanently removes a business and
+// everything tied to it (users, inventory, sales, categories, brands,
+// webauthn credentials). Every child table already references businesses
+// with ON DELETE CASCADE, so this one query is genuinely everything —
+// nothing gets left behind as orphaned rows. Irreversible; the frontend is
+// expected to confirm before ever calling this.
+app.delete('/admin/businesses/:id', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM businesses WHERE id = $1 RETURNING id, name', [req.params.id]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Business not found' });
+    console.log(`[admin] business deleted: ${result.rows[0].name} (${result.rows[0].id}) by super admin ${req.user.userId}`);
+    res.json({ deleted: true, name: result.rows[0].name });
+  } catch (err) {
+    console.error('[/admin/businesses/:id DELETE]', err.message);
+    res.status(500).json({ error: 'Could not delete business' });
   }
 });
 
