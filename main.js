@@ -1933,20 +1933,26 @@ async function callGeminiWithRetry(baseRequestBody) {
     const model = GEMINI_MODEL_CHAIN[modelIdx];
     // thinkingLevel (Gemini 3.x) and thinkingBudget (Gemini 2.5 and earlier)
     // are mutually exclusive per Google's API — sending the wrong one for a
-    // given model's generation either gets silently ignored (leaving
-    // thinking at its default, which is what was actually causing MAX_TOKENS
-    // truncation before) or triggers a 400. The primary "-latest" flash
-    // alias currently resolves to a Gemini 3.x model. 'minimal' was tried
-    // first but this model's API rejected it outright with a 400
-    // ("Thinking level MINIMAL is not supported for this model") — confirmed
-    // via Render logs, not a guess — so 'low' (the lowest of the accepted
-    // low/medium/high tier) is used instead. The fallback is a Flash-Lite
-    // tier, which doesn't think by default — no config needed there.
+    // given model's generation either gets silently ignored or triggers a
+    // 400. The primary "-latest" flash alias currently resolves to a
+    // Gemini 3.x model. 'minimal' was tried first but this model's API
+    // rejected it outright with a 400 ("Thinking level MINIMAL is not
+    // supported for this model") — confirmed via Render logs. 'low' was
+    // tried next and avoided that error, but production testing showed it
+    // undershoots badly on genuinely busy pages: a real 16-line handwritten
+    // sales book photo came back with only the FIRST line extracted and a
+    // clean, validly-formed response otherwise (no truncation, no error) —
+    // the model simply didn't reason far enough to keep working through a
+    // dense, messy image. 'high' fixes that at the cost of somewhat higher
+    // latency/token spend per call, which is the right tradeoff here since
+    // a wrong/incomplete extraction is far more costly (silently missing
+    // most of a day's sales) than a slower one. The fallback is a
+    // Flash-Lite tier, which doesn't think by default — no config there.
     const requestBody = {
       ...baseRequestBody,
       generationConfig: {
         ...baseRequestBody.generationConfig,
-        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'low' } } : {}),
+        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'high' } } : {}),
       },
     };
     // Primary model gets the full retry budget (1 initial + 3 retries).
@@ -2148,9 +2154,12 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
         generationConfig: {
           // A full page can easily run 20-30 line items once each carries
           // description/qty/amount/category/expiry/batch — generous on
-          // purpose. thinkingConfig itself is injected per-model inside
+          // purpose, and bumped up further alongside thinkingLevel: 'high'
+          // (set inside callGeminiWithRetry) since higher thinking uses more
+          // of the model's reasoning budget on a genuinely busy page.
+          // thinkingConfig itself is injected per-model inside
           // callGeminiWithRetry, not set here — see the comment there for why.
-          maxOutputTokens: 16384,
+          maxOutputTokens: 24576,
           // Low, not zero — a little headroom to correctly interpret messy
           // shorthand and column layouts, but low enough that numeric fields
           // don't wander. This is also what keeps two runs of the SAME photo
