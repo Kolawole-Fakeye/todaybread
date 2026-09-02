@@ -921,6 +921,28 @@ app.post('/auth/reset-pin', requireAuth, async (req, res) => {
   }
 });
 
+// POST /auth/forgot-pin — public (no auth, since the whole point is the
+// person is locked out). Flags pin_reset_requested on that phone's account
+// so it shows up in /admin/pin-resets for a super admin to resolve manually
+// over WhatsApp. This was called by the frontend's "Forgot PIN?" flow but
+// never actually existed on the backend — every request 404'd silently and
+// pin_reset_requested never got set, so the admin panel's reset queue was
+// always empty regardless of how many people tapped the button.
+// Always responds success (never reveals whether a phone is registered) —
+// same reasoning as any account-recovery endpoint.
+app.post('/auth/forgot-pin', async (req, res) => {
+  const { phone } = req.body;
+  if (!phone || !phone.trim()) return res.status(400).json({ error: 'phone is required' });
+  try {
+    await pool.query('UPDATE users SET pin_reset_requested = true WHERE phone = $1', [phone.trim()]);
+  } catch (err) {
+    console.error('[/auth/forgot-pin] error:', err.message);
+    // Still respond success — don't leak whether the update failed due to
+    // the phone not existing vs. a real server error.
+  }
+  res.json({ requested: true });
+});
+
 app.get('/me', requireAuth, async (req, res) => {
   try {
     const business = await pool.query(
@@ -1837,6 +1859,23 @@ function normalize(str) {
   return String(str || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
 }
 
+// Guards against Gemini's numeric-schema decoding occasionally running away
+// into a huge digit string (seen in production logs as a quantity value
+// blowing up into thousands of trailing zeros and eating the entire
+// response token budget). Any raw value that's implausibly long or out of
+// a sane real-world range is treated as unreadable (null) rather than
+// trusted — a shopkeeper's ledger line is never actually a 7+ digit quantity
+// or a billion-naira single-line amount, so there's no real data lost by
+// rejecting values like that; it's always corruption.
+function safeParsedNumber(raw, { max = 1e7 } = {}) {
+  if (raw === null || raw === undefined) return null;
+  const str = String(raw).trim();
+  if (str.length === 0 || str.length > 15) return null; // corrupted/runaway values are always this long
+  const n = Number(str.replace(/[^0-9.\-]/g, ''));
+  if (!Number.isFinite(n) || Math.abs(n) > max) return null;
+  return n;
+}
+
 // Simple word-overlap matcher — good enough for short product names typed
 // or handwritten inconsistently (e.g. "brake fluid dot3" vs "DOT 3 Brake Fluid").
 // Always returns the single best candidate if one exists (even a weak one) —
@@ -2079,9 +2118,13 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       `Respond with ONLY the structured JSON — no explanation, no markdown code fences, no commentary before or after it, ` +
       `even if the input looks unusual or you're unsure. In this exact shape: ` +
       `{"items": [{"description": "...", "quantity": number, "amount": number_or_null, "category": string_or_null, "expiryDate": string_or_null, "batchNumber": string_or_null}]}. ` +
+      `"quantity" and "amount" must be plain numeric strings ONLY (e.g. "3", "23550") — digits and at most one ` +
+      `decimal point, nothing else, no currency symbols, no commas, no units, no trailing/leading zeros beyond ` +
+      `what's actually written. If you are not confident of the exact digits, use null rather than guessing — ` +
+      `never pad, repeat, or extend a number's digits under any circumstance. ` +
       `"amount" is the TOTAL ₦ value written for that line — the number next to/after the item as a whole, already ` +
-      `covering all units on that line (e.g. "Baby Diaper 1pack ₦5000" → amount 5000; "Indomie 3carton ₦23550" → ` +
-      `amount 23550, not divided by 3). Never compute or guess a per-unit price yourself — extract exactly the ` +
+      `covering all units on that line (e.g. "Baby Diaper 1pack ₦5000" → amount "5000"; "Indomie 3carton ₦23550" → ` +
+      `amount "23550", not divided by 3). Never compute or guess a per-unit price yourself — extract exactly the ` +
       `total figure as written, and leave unit-price math to the app. ` +
       `If a quantity or amount is unreadable or absent, use null. Do not guess values that aren't actually there. ` +
       `If truly nothing on the page looks like an item line, respond with {"items": []}.`;
@@ -2108,6 +2151,13 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
           // purpose. thinkingConfig itself is injected per-model inside
           // callGeminiWithRetry, not set here — see the comment there for why.
           maxOutputTokens: 16384,
+          // Low, not zero — a little headroom to correctly interpret messy
+          // shorthand and column layouts, but low enough that numeric fields
+          // don't wander. This is also what keeps two runs of the SAME photo
+          // from reading a brand/product name two different ways (seen in
+          // production as "Diwata"/"Dwng"/"Softcare" for one handwritten
+          // brand across separate attempts).
+          temperature: 0.1,
           responseMimeType: 'application/json',
           responseSchema: {
             type: 'OBJECT',
@@ -2118,8 +2168,15 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
                   type: 'OBJECT',
                   properties: {
                     description: { type: 'STRING' },
-                    quantity: { type: 'NUMBER', nullable: true },
-                    amount: { type: 'NUMBER', nullable: true },
+                    // quantity/amount are STRING here, not NUMBER — Gemini's
+                    // constrained decoding on NUMBER-typed schema fields is
+                    // what produced the runaway-digit corruption seen in
+                    // Render logs (a quantity value ballooning into
+                    // thousands of trailing zeros and eating the whole
+                    // response token budget on a busy page). Parsed safely
+                    // via safeParsedNumber() below instead of trusted raw.
+                    quantity: { type: 'STRING', nullable: true },
+                    amount: { type: 'STRING', nullable: true },
                     category: { type: 'STRING', nullable: true },
                     expiryDate: { type: 'STRING', nullable: true },
                     batchNumber: { type: 'STRING', nullable: true },
@@ -2212,7 +2269,12 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
 
     const reviewed = rows.map((row) => {
       const match = fuzzyMatchItem(row.description, inventory);
-      const qty = row.quantity || 1;
+      // Both parsed defensively — see safeParsedNumber() above. A row whose
+      // quantity comes back corrupted/unreadable defaults to 1 rather than
+      // silently propagating a huge or nonsensical number to the review
+      // screen (or worse, to a committed sale).
+      const qty = safeParsedNumber(row.quantity) || 1;
+      const parsedAmount = safeParsedNumber(row.amount);
       const unitPrice = match ? Number(match.item.sale_price) : null;
       // Only pass through a date that actually matches the format we asked
       // for — protects the frontend's <input type="date"> from receiving
@@ -2221,12 +2283,12 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
       return {
         rawDescription: row.description,
         quantity: qty,
-        amountOnPage: row.amount,
+        amountOnPage: parsedAmount,
         suggestedCategory: row.category || null,
         suggestedExpiryDate: validExpiry,
         suggestedBatchNumber: row.batchNumber || null,
         matchedItem: match ? { id: match.item.id, name: match.item.name, confidence: Number(match.confidence.toFixed(2)) } : null,
-        suggestedTotal: unitPrice ? unitPrice * qty : row.amount,
+        suggestedTotal: unitPrice ? unitPrice * qty : parsedAmount,
         needsReview: !match || match.confidence < 0.6,
       };
     });
