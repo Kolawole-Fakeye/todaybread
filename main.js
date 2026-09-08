@@ -657,11 +657,64 @@ const FRONTEND_URL = process.env.DASHBOARD_URL || 'https://todaybread.netlify.ap
 // EXPRESS APP
 // ----------------------------------------------------------------------------
 const app = express();
-app.use(cors());
+// Locked to TodayBread's own frontend(s) rather than left wide open —
+// previously app.use(cors()) allowed any website to call this API directly
+// from a browser. Bearer-token auth (not cookies) means this was never a
+// CSRF risk, but an open CORS policy still meant any third-party site could
+// script calls against public endpoints (signup, login, forgot-pin) from a
+// visitor's browser. Non-browser callers (curl, Postman, server-to-server,
+// the Render health check) send no Origin header at all and are unaffected
+// either way — this only restricts actual browser-based cross-origin calls.
+const ALLOWED_ORIGINS = [FRONTEND_URL, 'http://localhost:3000', 'http://localhost:5173'];
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+}));
 // Also stash the raw bytes of every request body — Paystack's webhook
 // signature is an HMAC over the exact original bytes, which re-serializing
 // req.body back to JSON would not reliably reproduce.
 app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
+
+// ----------------------------------------------------------------------------
+// LIGHTWEIGHT RATE LIMITING — same in-memory-Map pattern as loginAttempts
+// below, no new dependency. Scoped to the endpoints where abuse actually
+// costs money or enables enumeration: /ocr/parse-page now fires TWO paid AI
+// calls per request (Gemini + OpenAI in parallel), so an unthrottled loop
+// against it — even from a legitimately logged-in account — burns real
+// money fast. /auth/signup and /auth/forgot-pin are public (no auth token
+// required), so they're throttled by IP instead of by user.
+// Resets on server restart, same tradeoff as loginAttempts — this stops a
+// sustained script, not a determined attacker rotating IPs, which is the
+// right bar for a small business tool at this stage.
+// ----------------------------------------------------------------------------
+function makeRateLimiter({ windowMs, max }) {
+  const hits = new Map();
+  return (keyFn) => (req, res, next) => {
+    const key = keyFn(req);
+    const now = Date.now();
+    const entry = hits.get(key);
+    if (!entry || now - entry.windowStart > windowMs) {
+      hits.set(key, { windowStart: now, count: 1 });
+      return next();
+    }
+    entry.count += 1;
+    if (entry.count > max) {
+      const waitSec = Math.ceil((windowMs - (now - entry.windowStart)) / 1000);
+      return res.status(429).json({ error: `Too many requests — try again in ${waitSec} second${waitSec === 1 ? '' : 's'}.` });
+    }
+    next();
+  };
+}
+
+// 10 photo/text parses per 5 minutes per business — generous for genuine
+// end-of-day batch scanning, tight enough to stop a runaway loop from
+// quietly burning through both AI vendors' budgets.
+const ocrRateLimit = makeRateLimiter({ windowMs: 5 * 60 * 1000, max: 10 })((req) => `ocr:${req.user?.businessId || req.ip}`);
+// Signup/forgot-pin are unauthenticated — keyed by IP instead of businessId.
+const signupRateLimit = makeRateLimiter({ windowMs: 60 * 60 * 1000, max: 5 })((req) => `signup:${req.ip}`);
+const forgotPinRateLimit = makeRateLimiter({ windowMs: 60 * 60 * 1000, max: 5 })((req) => `forgot-pin:${req.ip}`);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -671,7 +724,7 @@ function generateSlug(name) {
   return base || 'shop-' + Date.now();
 }
 
-app.post('/auth/signup', async (req, res) => {
+app.post('/auth/signup', signupRateLimit, async (req, res) => {
   const { businessName, ownerName, phone, pin, whatsappNumber, address, inviteCode, industry, whatsappEnabled } = req.body;
   if (!businessName || !ownerName || !phone || !pin) {
     return res.status(400).json({ error: 'businessName, ownerName, phone, and pin are required' });
@@ -930,7 +983,7 @@ app.post('/auth/reset-pin', requireAuth, async (req, res) => {
 // always empty regardless of how many people tapped the button.
 // Always responds success (never reveals whether a phone is registered) —
 // same reasoning as any account-recovery endpoint.
-app.post('/auth/forgot-pin', async (req, res) => {
+app.post('/auth/forgot-pin', forgotPinRateLimit, async (req, res) => {
   const { phone } = req.body;
   if (!phone || !phone.trim()) return res.status(400).json({ error: 'phone is required' });
   try {
@@ -1163,12 +1216,20 @@ app.post('/auth/webauthn/register-verify', requireAuth, requireOwner, async (req
 app.post('/auth/webauthn/login-options', async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: 'phone is required' });
+  // Same error message and status whether the phone doesn't exist at all,
+  // or exists but has no Face ID credentials enrolled — previously these
+  // returned two distinguishable 404 messages, which let anyone probe
+  // arbitrary phone numbers to learn which ones are registered accounts.
+  // The frontend's "Sign in with Face ID" flow already treats any failure
+  // here the same way (shows its own generic error), so this loses no
+  // real functionality — only the ability to distinguish the two cases.
+  const NO_BIOMETRIC_LOGIN_ERROR = 'Biometric login is not available for that phone number';
   try {
     const userResult = await pool.query('SELECT id FROM users WHERE phone = $1', [phone]);
     const user = userResult.rows[0];
-    if (!user) return res.status(404).json({ error: 'No account found for that phone number' });
+    if (!user) return res.status(404).json({ error: NO_BIOMETRIC_LOGIN_ERROR });
     const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id = $1', [user.id]);
-    if (creds.rows.length === 0) return res.status(404).json({ error: 'Biometric login is not set up for this account' });
+    if (creds.rows.length === 0) return res.status(404).json({ error: NO_BIOMETRIC_LOGIN_ERROR });
     const options = await generateAuthenticationOptions({
       rpID: WEBAUTHN_RP_ID,
       allowCredentials: creds.rows.map((c) => ({ id: c.credential_id, type: 'public-key' })),
@@ -1940,24 +2001,27 @@ async function callGeminiWithRetry(baseRequestBody) {
     // are mutually exclusive per Google's API — sending the wrong one for a
     // given model's generation either gets silently ignored or triggers a
     // 400. The primary "-latest" flash alias currently resolves to a
-    // Gemini 3.x model. 'minimal' was tried first but this model's API
-    // rejected it outright with a 400 ("Thinking level MINIMAL is not
-    // supported for this model") — confirmed via Render logs. 'low' was
-    // tried next and avoided that error, but production testing showed it
-    // undershoots badly on genuinely busy pages: a real 16-line handwritten
-    // sales book photo came back with only the FIRST line extracted and a
-    // clean, validly-formed response otherwise (no truncation, no error) —
-    // the model simply didn't reason far enough to keep working through a
-    // dense, messy image. 'high' fixes that at the cost of somewhat higher
-    // latency/token spend per call, which is the right tradeoff here since
-    // a wrong/incomplete extraction is far more costly (silently missing
-    // most of a day's sales) than a slower one. The fallback is a
-    // Flash-Lite tier, which doesn't think by default — no config there.
+    // Gemini 3.x model. 'minimal' was rejected outright by this model
+    // (400: "Thinking level MINIMAL is not supported"). 'low' avoided that
+    // error but undershot badly on busy pages (a real 16-line photo came
+    // back with only the first line, cleanly, no error). 'high' fixed that
+    // but introduced a WORSE failure: Gemini's thinking tokens are drawn
+    // from the same maxOutputTokens budget as the actual JSON output, so
+    // spending more of that budget on reasoning about a dense page left
+    // too little room to write out the full result, reintroducing
+    // MAX_TOKENS truncation — just via a different mechanism than the
+    // original runaway-digit bug. 'medium' is the middle ground, paired
+    // with a larger maxOutputTokens ceiling (see below) and, more
+    // importantly, no longer trusted alone: /ocr/parse-page now runs
+    // Gemini and OpenAI in parallel on every photo and keeps whichever
+    // result is actually more complete, rather than tuning one vendor's
+    // single knob forever. The fallback is a Flash-Lite tier, which
+    // doesn't think by default — no config there.
     const requestBody = {
       ...baseRequestBody,
       generationConfig: {
         ...baseRequestBody.generationConfig,
-        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'high' } } : {}),
+        ...(modelIdx === 0 ? { thinkingConfig: { thinkingLevel: 'medium' } } : {}),
       },
     };
     // Primary model gets the full retry budget (1 initial + 3 retries).
@@ -2059,7 +2123,7 @@ async function repairMalformedJson(rawText) {
   return (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
 }
 
-app.post('/ocr/parse-page', requireAuth, async (req, res) => {
+app.post('/ocr/parse-page', requireAuth, ocrRateLimit, async (req, res) => {
   const { imageBase64, mediaType, text: pastedText, mode } = req.body;
   const hasImage = !!imageBase64;
   const hasText = !!(pastedText && pastedText.trim());
@@ -2151,133 +2215,149 @@ app.post('/ocr/parse-page', requireAuth, async (req, res) => {
           { text: `${instructions}\n\nHere is the pasted ledger text:\n\n${pastedText}` },
         ];
 
-    let text, finishReason, modelUsed;
-    try {
-      const aiRes = await callGeminiWithRetry({
-        systemInstruction: { role: 'system', parts: [{ text: RECEIPT_PARSER_SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts }],
-        generationConfig: {
-          // A full page can easily run 20-30 line items once each carries
-          // description/qty/amount/category/expiry/batch — generous on
-          // purpose, and bumped up further alongside thinkingLevel: 'high'
-          // (set inside callGeminiWithRetry) since higher thinking uses more
-          // of the model's reasoning budget on a genuinely busy page.
-          // thinkingConfig itself is injected per-model inside
-          // callGeminiWithRetry, not set here — see the comment there for why.
-          maxOutputTokens: 24576,
-          // Low, not zero — a little headroom to correctly interpret messy
-          // shorthand and column layouts, but low enough that numeric fields
-          // don't wander. This is also what keeps two runs of the SAME photo
-          // from reading a brand/product name two different ways (seen in
-          // production as "Diwata"/"Dwng"/"Softcare" for one handwritten
-          // brand across separate attempts).
-          temperature: 0.1,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT',
-            properties: {
-              items: {
-                type: 'ARRAY',
+    // Pulls a rows array out of raw model text — strips markdown fences if
+    // present, then grabs the first [...] block from wherever it sits (the
+    // model occasionally adds a stray sentence before/after the JSON).
+    // Throws if nothing parseable is found; callers handle the repair pass.
+    function extractRowsFromText(rawText) {
+      const fenceStripped = rawText.replace(/```json\s*|```/g, '');
+      const arrayMatch = fenceStripped.match(/\[[\s\S]*\]/);
+      const cleaned = arrayMatch ? arrayMatch[0] : fenceStripped;
+      const parsed = JSON.parse(cleaned);
+      const rowsOut = Array.isArray(parsed) ? parsed : (parsed.items || parsed.rows || parsed.lines || []);
+      if (!Array.isArray(rowsOut)) throw new Error('not an array');
+      return rowsOut;
+    }
+
+    // One vendor's full attempt: call, parse, self-repair once if the raw
+    // output was malformed. Never throws — always returns a result object
+    // so both vendors can be run in parallel and compared afterward rather
+    // than one only kicking in once the other has already hard-failed.
+    async function tryGeminiExtraction() {
+      let modelUsed, finishReason, text;
+      try {
+        const aiRes = await callGeminiWithRetry({
+          systemInstruction: { role: 'system', parts: [{ text: RECEIPT_PARSER_SYSTEM_PROMPT }] },
+          contents: [{ role: 'user', parts }],
+          generationConfig: {
+            // Bumped further alongside dialing thinkingLevel back to
+            // 'medium' (see callGeminiWithRetry) — thinking tokens draw
+            // from this same budget, so more headroom here reduces the
+            // chance of truncation regardless of how much of it reasoning
+            // ends up using on a given page.
+            maxOutputTokens: 32768,
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: {
                 items: {
-                  type: 'OBJECT',
-                  properties: {
-                    description: { type: 'STRING' },
-                    // quantity/amount are STRING here, not NUMBER — Gemini's
-                    // constrained decoding on NUMBER-typed schema fields is
-                    // what produced the runaway-digit corruption seen in
-                    // Render logs (a quantity value ballooning into
-                    // thousands of trailing zeros and eating the whole
-                    // response token budget on a busy page). Parsed safely
-                    // via safeParsedNumber() below instead of trusted raw.
-                    quantity: { type: 'STRING', nullable: true },
-                    amount: { type: 'STRING', nullable: true },
-                    category: { type: 'STRING', nullable: true },
-                    expiryDate: { type: 'STRING', nullable: true },
-                    batchNumber: { type: 'STRING', nullable: true },
+                  type: 'ARRAY',
+                  items: {
+                    type: 'OBJECT',
+                    properties: {
+                      description: { type: 'STRING' },
+                      quantity: { type: 'STRING', nullable: true },
+                      amount: { type: 'STRING', nullable: true },
+                      category: { type: 'STRING', nullable: true },
+                      expiryDate: { type: 'STRING', nullable: true },
+                      batchNumber: { type: 'STRING', nullable: true },
+                    },
+                    required: ['description'],
                   },
-                  required: ['description'],
                 },
               },
+              required: ['items'],
             },
-            required: ['items'],
           },
-        },
-      });
-      const aiData = aiRes.aiData;
-      modelUsed = aiRes.modelUsed;
-      finishReason = aiData.candidates?.[0]?.finishReason;
-      text = (aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
-    } catch (geminiErr) {
-      console.error('[ocr] Gemini exhausted (all models, all retries):', geminiErr.message);
-      // Only reached once every Gemini model and every retry has failed —
-      // try a completely different vendor before giving up entirely.
+        });
+        modelUsed = aiRes.modelUsed;
+        finishReason = aiRes.aiData.candidates?.[0]?.finishReason;
+        text = (aiRes.aiData.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+      } catch (err) {
+        return { ok: false, vendor: 'gemini', error: err.message, transient: err.transient };
+      }
       try {
-        text = await callOpenAIVisionFallback({
-          systemPrompt: RECEIPT_PARSER_SYSTEM_PROMPT, instructions, imageBase64, mediaType, pastedText,
-        });
-        modelUsed = 'gpt-4o (cross-provider fallback)';
-        finishReason = null;
-        console.warn('[ocr] cross-provider fallback (OpenAI) succeeded after Gemini exhausted');
-      } catch (fallbackErr) {
-        console.error('[ocr] cross-provider fallback also failed:', fallbackErr.message);
-        // Both vendors exhausted — this is the genuine "nothing worked" case.
-        return res.status(geminiErr.transient ? 503 : 502).json({
-          error: geminiErr.transient
-            ? "Network busy — tap 'Parse entries' again in a few seconds."
-            : 'Vision extraction failed',
-          debug: `Gemini: ${geminiErr.message} | Cross-provider fallback: ${fallbackErr.message}`,
-        });
+        return { ok: true, vendor: 'gemini', modelUsed, finishReason, rows: extractRowsFromText(text), text };
+      } catch (parseErr) {
+        try {
+          const repairedText = await repairMalformedJson(text);
+          return { ok: true, vendor: 'gemini', modelUsed, finishReason, rows: extractRowsFromText(repairedText), text };
+        } catch (repairErr) {
+          return { ok: false, vendor: 'gemini', modelUsed, finishReason, error: repairErr.message, rawText: text };
+        }
       }
     }
 
-    // Don't assume the whole response is pure JSON — strip fences if present,
-    // then pull out the first [...] block from wherever it actually sits in
-    // the response. Survives the model adding a stray sentence of commentary
-    // before or after the array, which happens more often on messy/ambiguous
-    // input than on a clean, obvious ledger.
-    const fenceStripped = text.replace(/```json\s*|```/g, '');
-    const arrayMatch = fenceStripped.match(/\[[\s\S]*\]/);
-    const cleaned = arrayMatch ? arrayMatch[0] : fenceStripped;
-    let rows;
-    try {
-      const parsed = JSON.parse(cleaned);
-      rows = Array.isArray(parsed) ? parsed : (parsed.items || parsed.rows || parsed.lines || []);
-      if (!Array.isArray(rows)) throw new Error('not an array');
-    } catch (e) {
-      console.warn('[ocr] output malformed, attempting one self-repair pass:', e.message);
-      let repaired = false;
+    async function tryOpenAIExtraction() {
+      if (!process.env.OPENAI_API_KEY) return { ok: false, vendor: 'openai', error: 'OPENAI_API_KEY not configured' };
+      let text;
       try {
-        const repairedText = await repairMalformedJson(text);
-        const repairedCleaned = repairedText.replace(/```json\s*|```/g, '');
-        const repairedParsed = JSON.parse(repairedCleaned);
-        const repairedRows = Array.isArray(repairedParsed) ? repairedParsed : (repairedParsed.items || repairedParsed.rows || repairedParsed.lines || []);
-        if (!Array.isArray(repairedRows)) throw new Error('repair output also not an array');
-        rows = repairedRows;
-        repaired = true;
-        console.warn('[ocr] self-repair succeeded');
-      } catch (repairErr) {
-        console.error('[ocr] self-repair also failed:', repairErr.message);
+        text = await callOpenAIVisionFallback({ systemPrompt: RECEIPT_PARSER_SYSTEM_PROMPT, instructions, imageBase64, mediaType, pastedText });
+      } catch (err) {
+        return { ok: false, vendor: 'openai', error: err.message };
       }
-      if (!repaired) {
-        console.error('[ocr] could not parse output even after repair attempt:', text);
-        if (finishReason === 'MAX_TOKENS') {
-          // thinkingLevel: 'low' (not thinkingBudget — Gemini 3 uses a
-          // different parameter, and can't fully disable thinking) plus a
-          // generous maxOutputTokens should make this rare — if it still
-          // happens, it's a genuinely huge single page, not an artificial cap.
-          return res.status(502).json({
-            error: 'Could not read the whole page in one pass — try a clearer photo, or split it if it covers more than one day.',
-            debug: `Response was truncated at the token limit (finishReason: MAX_TOKENS). Partial output: ${text.slice(-300)}`,
-          });
+      try {
+        return { ok: true, vendor: 'openai', modelUsed: 'gpt-4o', rows: extractRowsFromText(text), text };
+      } catch (parseErr) {
+        try {
+          const repairedText = await repairMalformedJson(text);
+          return { ok: true, vendor: 'openai', modelUsed: 'gpt-4o', rows: extractRowsFromText(repairedText), text };
+        } catch (repairErr) {
+          return { ok: false, vendor: 'openai', modelUsed: 'gpt-4o', error: repairErr.message, rawText: text };
         }
-        return res.status(502).json({
-          error: hasImage ? 'Could not parse extracted data — try a clearer photo' : 'Could not parse the pasted text — check it copied over correctly',
-          // Raw model output, truncated — lets you see exactly what it said
-          // instead of having to go dig through Render's server logs.
-          debug: text.slice(0, 800),
-        });
       }
     }
+
+    let chosen;
+    if (hasImage) {
+      // Run BOTH vendors on every photo and keep whichever result is
+      // actually more complete, rather than only reaching for OpenAI once
+      // Gemini hard-fails. This is the direct fix for the inconsistency
+      // seen in production: Gemini would return a clean, error-free
+      // response that nonetheless only captured 1 of 16 real lines — a
+      // fallback keyed on errors alone never catches a "successful but
+      // thin" result like that. Costs one extra vendor call per photo;
+      // worth it for a feature where silently dropping most of a day's
+      // sales is the failure mode being guarded against.
+      const [geminiResult, openaiResult] = await Promise.all([tryGeminiExtraction(), tryOpenAIExtraction()]);
+      const candidates = [geminiResult, openaiResult].filter((r) => r.ok);
+      if (candidates.length === 0) {
+        console.error('[ocr] both vendors failed — Gemini:', geminiResult.error, '| OpenAI:', openaiResult.error);
+        return res.status(geminiResult.transient ? 503 : 502).json({
+          error: geminiResult.transient
+            ? "Network busy — tap 'Parse entries' again in a few seconds."
+            : "Could not read the page — try a clearer photo, or tap 'Parse entries' again.",
+          debug: `Gemini: ${geminiResult.error} | OpenAI: ${openaiResult.error}`,
+        });
+      }
+      chosen = candidates.reduce((best, cur) => (cur.rows.length > best.rows.length ? cur : best));
+      console.log(`[ocr] gemini=${geminiResult.ok ? geminiResult.rows.length + ' rows' : 'failed'} openai=${openaiResult.ok ? openaiResult.rows.length + ' rows' : 'failed'} chose=${chosen.vendor}`);
+    } else {
+      // Pasted text isn't the flaky case this dual-vendor approach targets
+      // (it's typed/Lens-extracted text, not a messy photo) — keep this
+      // path simple and sequential: Gemini first, OpenAI only if Gemini
+      // truly fails, same as before.
+      const geminiResult = await tryGeminiExtraction();
+      if (geminiResult.ok) {
+        chosen = geminiResult;
+      } else {
+        const openaiResult = await tryOpenAIExtraction();
+        if (openaiResult.ok) {
+          chosen = openaiResult;
+        } else {
+          return res.status(geminiResult.transient ? 503 : 502).json({
+            error: geminiResult.transient
+              ? "Network busy — tap 'Parse entries' again in a few seconds."
+              : 'Could not parse the pasted text — check it copied over correctly',
+            debug: `Gemini: ${geminiResult.error} | OpenAI: ${openaiResult.error}`,
+          });
+        }
+      }
+    }
+
+    const rows = chosen.rows;
+    const modelUsed = chosen.modelUsed;
 
     const inventory = (await pool.query('SELECT * FROM inventory_items WHERE business_id = $1', [req.user.businessId])).rows;
 
